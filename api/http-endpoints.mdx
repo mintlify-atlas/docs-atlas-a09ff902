@@ -1,0 +1,292 @@
+---
+title: "CozoDB HTTP API endpoints reference"
+description: "Complete reference for all REST and SSE endpoints exposed by the CozoDB standalone server, including text-query, export, import, backup, and changes."
+---
+
+The CozoDB standalone server exposes a small set of HTTP endpoints for querying, importing, exporting, and backing up data. All endpoints return JSON. The default base URL is `http://127.0.0.1:9070`.
+
+<Note>
+  When the server is bound to a non-loopback address, every request must include an authentication token. See [Running CozoDB as a standalone HTTP server](/api/http-server) for details.
+</Note>
+
+---
+
+## POST /text-query
+
+Run a CozoScript query against the database.
+
+### Request body
+
+<ParamField body="script" type="string" required>
+  A CozoScript query string. Use `$name` syntax to reference values from `params`.
+</ParamField>
+
+<ParamField body="params" type="object">
+  Named query parameters. Keys map to `$key` references in the script. Always use params instead of string concatenation to avoid injection issues.
+</ParamField>
+
+<ParamField body="immutable" type="boolean" default="false">
+  When `true`, the query is run in read-only mode even if the auth token grants write access.
+</ParamField>
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  `true` on success, `false` on error.
+</ResponseField>
+
+<ResponseField name="headers" type="string[]">
+  Column names of the result relation. Present when `ok` is `true`.
+</ResponseField>
+
+<ResponseField name="rows" type="array[]">
+  Result rows, each an array of values ordered to match `headers`. Present when `ok` is `true`.
+</ResponseField>
+
+<ResponseField name="message" type="string">
+  Human-readable error message. Present when `ok` is `false`.
+</ResponseField>
+
+<ResponseField name="display" type="string">
+  Formatted diagnostic output with source context. Present when `ok` is `false` and diagnostic information is available.
+</ResponseField>
+
+### Examples
+
+<CodeGroup>
+
+```bash curl
+curl -X POST http://127.0.0.1:9070/text-query \
+  -H "Content-Type: application/json" \
+  -d '{"script": "?[a] := a in [1, 2, 3]", "params": {}}'
+```
+
+```bash curl with params
+curl -X POST http://127.0.0.1:9070/text-query \
+  -H "Content-Type: application/json" \
+  -d '{"script": "?[name] := name = $name", "params": {"name": "Alice"}}'
+```
+
+</CodeGroup>
+
+**Success response:**
+
+```json
+{
+  "ok": true,
+  "headers": ["a"],
+  "rows": [[1], [2], [3]]
+}
+```
+
+**Error response:**
+
+```json
+{
+  "ok": false,
+  "message": "Variable 'x' is unbound",
+  "display": "    × Variable 'x' is unbound\n   ..."
+}
+```
+
+<Tip>
+  Always pass variable data through `params` rather than building query strings by concatenation. This prevents injection issues and improves query plan caching.
+</Tip>
+
+---
+
+## GET /export/{relations}
+
+Export one or more stored relations as JSON.
+
+### Path parameters
+
+<ParamField path="relations" type="string" required>
+  Comma-separated list of relation names to export. Example: `rel1,rel2,rel3`.
+</ParamField>
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  `true` on success.
+</ResponseField>
+
+<ResponseField name="data" type="object">
+  An object keyed by relation name. Each value is a `NamedRows` object containing `headers` and `rows`, in the same format returned by `/text-query`.
+</ResponseField>
+
+### Example
+
+```bash curl
+curl "http://127.0.0.1:9070/export/users,products"
+```
+
+```json
+{
+  "ok": true,
+  "data": {
+    "users": {
+      "headers": ["id", "name"],
+      "rows": [[1, "Alice"], [2, "Bob"]]
+    }
+  }
+}
+```
+
+---
+
+## PUT /import
+
+Import data into the database. The request body must use `Content-Type: application/json` and match the format returned by the `/export` endpoint (a JSON object keyed by relation name).
+
+### Request body
+
+A JSON object where each key is a relation name and each value is a `NamedRows` object:
+
+```json
+{
+  "users": {
+    "headers": ["id", "name"],
+    "rows": [[1, "Alice"], [2, "Bob"]]
+  }
+}
+```
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  `true` on success.
+</ResponseField>
+
+### Example
+
+```bash curl
+curl -X PUT http://127.0.0.1:9070/import \
+  -H "Content-Type: application/json" \
+  -d '{"users": {"headers": ["id", "name"], "rows": [[1, "Alice"]]}}'
+```
+
+<Warning>
+  Triggers defined on the target relations are **not** executed during import. If you need triggers to fire, use parameterized queries via `/text-query` instead.
+</Warning>
+
+---
+
+## POST /backup
+
+Create a backup of the current database to a file path on the server's filesystem.
+
+### Request body
+
+<ParamField body="path" type="string" required>
+  Absolute path on the server where the backup file will be written.
+</ParamField>
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  `true` on success.
+</ResponseField>
+
+### Example
+
+```bash curl
+curl -X POST http://127.0.0.1:9070/backup \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/var/backups/cozo/mydb-backup.db"}'
+```
+
+```json
+{"ok": true}
+```
+
+---
+
+## POST /import-from-backup
+
+Restore selected relations from a previously created backup file into the running database.
+
+### Request body
+
+<ParamField body="path" type="string" required>
+  Absolute path to the backup file on the server's filesystem.
+</ParamField>
+
+<ParamField body="relations" type="string[]" required>
+  List of relation names to restore from the backup.
+</ParamField>
+
+### Response
+
+<ResponseField name="ok" type="boolean" required>
+  `true` on success.
+</ResponseField>
+
+### Example
+
+```bash curl
+curl -X POST http://127.0.0.1:9070/import-from-backup \
+  -H "Content-Type: application/json" \
+  -d '{"path": "/var/backups/cozo/mydb-backup.db", "relations": ["users", "products"]}'
+```
+
+```json
+{"ok": true}
+```
+
+<Warning>
+  As with `/import`, triggers are **not** run for relations restored from a backup. Use parameterized queries if trigger execution is required.
+</Warning>
+
+---
+
+## GET /
+
+Opening the root URL in a browser serves a minimal built-in web UI. Open your browser's developer tools console to interact with it. This is useful for ad-hoc queries during development.
+
+```bash curl
+curl http://127.0.0.1:9070/
+```
+
+---
+
+## GET /changes/{relation} <Badge color="yellow">Experimental</Badge>
+
+Subscribe to a Server-Sent Events (SSE) stream that emits an event whenever a mutation is made to the specified relation.
+
+### Path parameters
+
+<ParamField path="relation" type="string" required>
+  The name of the relation to observe.
+</ParamField>
+
+### Event payload
+
+Each SSE event carries a JSON object:
+
+<ResponseField name="op" type="string">
+  The mutation operation type (e.g., `put`, `retract`).
+</ResponseField>
+
+<ResponseField name="new_rows" type="object">
+  A `NamedRows` object representing the rows after the mutation.
+</ResponseField>
+
+<ResponseField name="old_rows" type="object">
+  A `NamedRows` object representing the rows before the mutation.
+</ResponseField>
+
+### Example
+
+```bash curl
+curl -N -H "Accept: text/event-stream" \
+  http://127.0.0.1:9070/changes/users
+```
+
+```text
+data: {"op":"put","new_rows":{"headers":["id","name"],"rows":[[3,"Carol"]]},"old_rows":{"headers":["id","name"],"rows":[]}}
+```
+
+<Note>
+  This endpoint relies on the [Server-Sent Events](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events) protocol. The connection remains open until the client disconnects. The `-N` flag disables curl's output buffering, which is needed to see events as they arrive.
+</Note>

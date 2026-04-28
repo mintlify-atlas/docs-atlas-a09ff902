@@ -1,0 +1,150 @@
+---
+title: 'Recursive Datalog queries for graph traversal in CozoDB'
+description: 'Write recursive CozoScript rules for reachability, shortest paths, and graph traversal. Learn stratified negation and which aggregations are recursion-safe.'
+keywords: ['cozoscript', 'recursion', 'datalog', 'graph', 'shortest path', 'cozodb']
+---
+
+Recursion is one of the most compelling reasons to use Datalog over SQL for graph data. In CozoScript, a rule can reference itself (or a mutually dependent rule) to derive new facts from previously derived ones. The engine computes a **fixpoint**: it keeps applying the rules until no new facts are produced. This makes transitive closure, reachability, and shortest-path queries natural and efficient to express.
+
+## Basic recursive pattern
+
+A rule is recursive when its body refers to its own head. You need at least one **base case** (a non-recursive rule) and one **inductive case** (a rule that extends the derived set):
+
+```
+reachable[to] := *route{fr: 'FRA', to}
+reachable[to] := reachable[stop], *route{fr: stop, to}
+?[count_unique(to)] := reachable[to]
+```
+
+The first rule seeds `reachable` with all airports directly connected to `FRA`. The second rule extends `reachable` by one hop each iteration. The `?` rule then counts all unique reachable airports.
+
+| count_unique(to) |
+|---|
+| 3462 |
+
+## Mutual recursion
+
+Rules can call each other in a cycle. CozoDB detects such cycles and evaluates the entire strongly-connected component together:
+
+```
+even[n] := n = 0
+even[n] := n > 0, odd[m], m = n - 1
+
+odd[n] := n > 0, even[m], m = n - 1
+?[even(n)] := n in [0, 1, 2, 3, 4, 5]
+```
+
+## Stratified negation
+
+Negation (`not`) is allowed in CozoScript but must be **stratified**: a negated atom must not participate in the same recursive cycle as the rule that negates it. The engine automatically computes strata (evaluation layers) and verifies this constraint.
+
+Valid — negation is outside the recursive component:
+
+```
+dangerous[city] := *route{fr: city, to: city}   # self-loop
+
+?[name] := *airport{name}, not dangerous[name]
+```
+
+Invalid — this would create a cycle through negation:
+
+```
+# ERROR: negation inside a recursive cycle is not allowed
+a[x] := *data{x}, not b[x]
+b[x] := *data{x}, not a[x]
+```
+
+<Warning>
+CozoDB will reject queries where negation creates a recursive dependency. Restructure such queries so that the negated predicate is fully computed before the rule that uses it.
+</Warning>
+
+## Aggregations in recursive rules
+
+Most aggregations cannot be used in recursive rules because they are not monotone (their value can decrease as more facts are derived). The exceptions are **meet aggregations**, which are monotone by construction:
+
+| Aggregation | Safe in recursion |
+|---|---|
+| `min` | Yes |
+| `max` | Yes |
+| `min_cost` | Yes |
+| `shortest` | Yes |
+| `and` | Yes |
+| `or` | Yes |
+| `choice` | Yes |
+| `bit_and` | Yes |
+| `bit_or` | Yes |
+| `union` | Yes |
+| `intersection` | Yes |
+| `count`, `sum`, `collect`, `mean`, etc. | No |
+
+## Shortest paths with `shortest`
+
+The `shortest` aggregation accepts list-valued inputs and keeps the shortest list seen so far. This makes it ideal for hop-count shortest paths:
+
+```
+shortest_paths[to, shortest(path)] := *route{fr: 'FRA', to},
+                                      path = ['FRA', to]
+shortest_paths[to, shortest(path)] := shortest_paths[stop, prev_path],
+                                      *route{fr: stop, to},
+                                      path = append(prev_path, to)
+?[to, path, p_len] := shortest_paths[to, path], p_len = length(path)
+
+:order -p_len
+:limit 2
+```
+
+| to | path | p_len |
+|---|---|---|
+| YPO | `["FRA","YYZ","YTS","YMO","YFA","ZKE","YAT","YPO"]` | 8 |
+| BVI | `["FRA","AUH","BNE","ISA","BQL","BEU","BVI"]` | 7 |
+
+**How it works:** the base case builds single-hop paths as lists. Each recursive step extends a previously known path by one hop and records the result. The `shortest` aggregation ensures that for each destination, only the shortest path found so far is retained—allowing early pruning during fixpoint iteration.
+
+## Weighted shortest paths with `min_cost`
+
+Use `min_cost` when edges carry weights. It operates on `[value, cost]` pairs and retains the pair with the minimum numeric cost:
+
+```
+sp[to, min_cost([to, dist])] := *weighted_route{fr: 'FRA', to, dist}
+sp[to, min_cost([to, total])] := sp[stop, [_, prev_dist]],
+                                  *weighted_route{fr: stop, to, dist},
+                                  total = prev_dist + dist
+?[to, total_dist] := sp[to, [_, total_dist]]
+:order total_dist
+:limit 5
+```
+
+<Note>
+For production weighted shortest-path queries, consider using the built-in `ShortestPathDijkstra` fixed rule, which is significantly faster than recursive Datalog for dense graphs:
+
+```
+start[] <- [['FRA']]
+end[]   <- [['YPO']]
+?[src, dst, distance, path] <~ ShortestPathDijkstra(*route[], start[], end[])
+```
+</Note>
+
+## When not to use recursive Datalog
+
+Recursive rules are powerful but not always the fastest option:
+
+- **PageRank, community detection, betweenness centrality:** use the dedicated canned algorithms (fixed rules like `PageRank`, `LabelPropagation`, etc.). These are implemented in native Rust and run an order of magnitude faster than equivalent recursive Datalog for large graphs.
+- **Dense graphs with millions of edges:** the fixpoint iteration can produce a very large intermediate state. Canned algorithms are optimised for this.
+- **Weighted shortest paths on large graphs:** `ShortestPathDijkstra` uses a priority queue internally and avoids recomputing settled nodes.
+
+Recursive Datalog is best for: exploratory queries, moderate-sized graphs, queries that combine graph traversal with relational joins, and situations where you need full composability with the rest of the query.
+
+## Composability with inline rules
+
+You can mix recursive rules with non-recursive ones freely. The engine stratifies the entire program and evaluates each stratum in order:
+
+```
+# Non-recursive: compute which airports are in Europe
+european[ap] := *airport{code: ap, continent: 'EU'}
+
+# Recursive: reachability restricted to European airports
+eu_reachable[to] := european[fr], *route{fr, to}, european[to]
+eu_reachable[to] := eu_reachable[stop], *route{fr: stop, to}, european[to]
+
+?[count_unique(to)] := eu_reachable[to]
+```

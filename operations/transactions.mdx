@@ -1,0 +1,172 @@
+---
+title: "Transactions and concurrency in CozoDB"
+description: "How CozoDB uses MVCC for concurrent safety, how to run multi-statement transactions, use ScriptMutability, and subscribe to mutations via callbacks."
+keywords: ["transactions", "MVCC", "multi-statement transactions", "concurrency", "callbacks", "ScriptMutability", "TiKV"]
+---
+
+CozoDB uses Multi-Version Concurrency Control (MVCC) for all storage operations. MVCC
+means that concurrent readers never block writers and writers never block readers — each
+transaction sees a consistent snapshot of the database as it existed when the transaction
+began. Every query you run, whether it reads or writes, executes inside a transaction
+automatically.
+
+## Single-query transactions
+
+The simplest case requires no extra setup. Every call to `run_script` (Rust), `run`
+(Node.js), or the HTTP `/text-query` endpoint is automatically wrapped in a transaction
+that commits on success and rolls back on error.
+
+```rust
+use cozo::{DbInstance, ScriptMutability};
+
+let db = DbInstance::new("rocksdb", "/path/to/db", Default::default()).unwrap();
+let result = db.run_script(
+    "?[a] := *my_relation{ a }",
+    Default::default(),
+    ScriptMutability::Immutable,
+).unwrap();
+```
+
+## ScriptMutability
+
+The `ScriptMutability` enum controls whether a script is allowed to write to the database.
+Pass `Immutable` for read-only queries to prevent accidental mutations at the API level.
+
+| Variant | Behaviour |
+|---------|-----------|
+| `ScriptMutability::Mutable` | Script may read and write. |
+| `ScriptMutability::Immutable` | Script may only read; any write operation returns an error. |
+
+## Multi-statement transactions
+
+Use a multi-statement transaction when you need to execute several queries atomically —
+for example, to read a value and conditionally write based on it without another writer
+interfering in between.
+
+### Rust
+
+Use `db.multi_transaction(write)` which returns a `MultiTransaction` handle. The handle
+has `run_script`, `commit`, and `abort` methods.
+
+```rust
+use cozo::*;
+
+let db = DbInstance::new("rocksdb", "/path/to/db", Default::default()).unwrap();
+
+// Open a write transaction (true = write, false = read-only)
+let tx = db.multi_transaction(true);
+
+tx.run_script(
+    ":create account {id: Int => balance: Float}",
+    Default::default(),
+).unwrap();
+
+tx.run_script(
+    "?[id, balance] <- [[1, 100.0]] :put account {id => balance}",
+    Default::default(),
+).unwrap();
+
+// Commit — or call tx.abort() to roll back
+tx.commit().unwrap();
+```
+
+The `MultiTransaction` methods:
+
+| Method | Effect |
+|--------|--------|
+| `tx.run_script(script, params)` | Execute a query inside the transaction. |
+| `tx.commit()` | Commit all writes and end the transaction. |
+| `tx.abort()` | Roll back all writes and end the transaction. |
+
+A transaction also ends automatically if any query inside it returns an error.
+
+### Node.js
+
+```javascript
+const tx = db.multiTransact(true) // true = write transaction
+
+await tx.run("?[a] <- [[1]]  :put test { a }");
+await tx.run("?[a] <- [[2]]  :put test { a }");
+
+// Commit all writes atomically
+tx.commit();
+
+// Or roll back all writes
+// tx.abort();
+```
+
+<Note>
+  For the RocksDB backend, write transactions are guaranteed not to block concurrent
+  reads. Other backends may have different concurrency characteristics.
+</Note>
+
+## Read-only vs read-write transactions
+
+Multi-statement transactions can be opened in either read-only or read-write mode.
+Read-only transactions use fewer resources and impose no write locks.
+
+In the Rust API, pass `write: false` to `multi_transaction` to open a read-only
+transaction. In the Node.js API, `multiTransact(false)` opens a read-only transaction.
+
+## Callbacks on mutation
+
+Register a callback to be notified whenever rows are inserted, updated, or deleted in a
+named relation.
+
+### Rust
+
+`register_callback` returns `(u32, Receiver<(CallbackOp, NamedRows, NamedRows)>)`.
+Receive events on the returned channel in a background thread.
+
+```rust
+use cozo::*;
+
+let (cb_id, receiver) = db.register_callback("relation_name", None);
+
+std::thread::spawn(move || {
+    for (op, new_rows, old_rows) in receiver {
+        println!("operation: {:?}", op);
+        println!("new rows: {:?}", new_rows);
+        println!("old rows: {:?}", old_rows);
+    }
+});
+
+// Unregister when no longer needed
+db.unregister_callback(cb_id);
+```
+
+### Node.js
+
+```javascript
+db.registerCallback('relation_name', (op, newRows, oldRows) => {
+    console.log('operation:', op);
+    console.log('new rows:', newRows);
+    console.log('old rows:', oldRows);
+});
+```
+
+The `op` value is a `CallbackOp` that identifies the type of mutation (`Put`, `Rm`,
+and so on). `newRows` and `oldRows` are `NamedRows` objects containing the affected data.
+
+## SSE change streaming (experimental)
+
+The standalone HTTP server exposes a Server-Sent Events endpoint that streams mutations
+as they happen:
+
+```
+GET /changes/{relation}
+```
+
+This endpoint relies on the
+[SSE protocol](https://developer.mozilla.org/en-US/docs/Web/API/Server-sent_events/Using_server-sent_events)
+and is marked experimental. Treat it as unstable for production use.
+
+## TiKV transaction latency
+
+<Warning>
+  The TiKV backend incurs significantly higher per-transaction latency compared to all
+  other backends because every transaction involves network round-trips to the TiKV
+  cluster. Multi-statement transactions amplify this effect: each query in the transaction
+  requires additional network communication for coordination. Avoid TiKV for workloads
+  that are transaction-latency sensitive.
+</Warning>

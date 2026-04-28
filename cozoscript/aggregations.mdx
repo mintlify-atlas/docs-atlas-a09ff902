@@ -1,0 +1,230 @@
+---
+title: 'Aggregation functions in CozoScript queries'
+description: 'CozoScript aggregations work differently from SQL GROUP BY. Learn count, sum, collect, min_cost, shortest, and every built-in aggregation function.'
+keywords: ['cozoscript', 'aggregation', 'count', 'sum', 'collect', 'datalog', 'cozodb']
+---
+
+Aggregations in CozoScript are expressed directly in the **rule head**, not in a separate `GROUP BY` clause. Any variable that appears in the head without an aggregation function is a grouping key; any variable wrapped in an aggregation function is aggregated over all rows that share the same key values. This mirrors how functional languages handle folds rather than how SQL handles grouping.
+
+## Basic pattern
+
+```
+?[group_key, aggregation_fn(value)] := rule_body
+```
+
+Variables in the head that are **not** wrapped in an aggregation function form the implicit group. The engine collects all rows from the body that share the same group-key values and applies the aggregation function to the corresponding value column.
+
+## Counting
+
+**`count`** — counts every row (including duplicates):
+
+```
+?[count(name)] := *user{name}
+```
+
+**`count_unique`** — counts distinct values:
+
+```
+?[count_unique(to)] := *route{fr: 'FRA', to}
+```
+
+## Numeric aggregations
+
+**`sum`** — sum of numeric values:
+
+```
+?[category, sum(price)] := *product{category, price}
+```
+
+**`product`** — product (multiplication) of numeric values:
+
+```
+?[product(factor)] := *weights{factor}
+```
+
+**`min` / `max`** — minimum and maximum numeric values:
+
+```
+?[category, min(price), max(price)] := *product{category, price}
+```
+
+**`mean`** — arithmetic mean:
+
+```
+?[department, mean(salary)] := *employee{department, salary}
+```
+
+**`variance`** — sample variance:
+
+```
+?[variance(score)] := *result{score}
+```
+
+**`std_dev`** — sample standard deviation:
+
+```
+?[std_dev(score)] := *result{score}
+```
+
+## Collecting values into a list
+
+**`collect`** — gathers all values into a list:
+
+```
+?[group, collect(name)] := *user{group, name}
+```
+
+With an optional limit on the number of items collected:
+
+```
+?[group, collect(name, 5)] := *user{group, name}
+```
+
+**`unique`** — like `collect` but deduplicates:
+
+```
+?[collect(tag)] := *post_tag{post_id: $pid, tag}
+```
+
+**`union`** — takes list-valued inputs and returns their union as a deduplicated list:
+
+```
+?[union(tags)] := *post{author, tags}
+```
+
+**`intersection`** — returns the intersection of list-valued inputs:
+
+```
+?[intersection(allowed_roles)] := *user_policy{resource, allowed_roles}
+```
+
+**`group_count`** — returns a list of `[value, count]` pairs for each distinct value:
+
+```
+?[group_count(status)] := *order{status}
+```
+
+## Selecting a representative value
+
+**`choice`** — returns one arbitrary value from the group (deterministic but unspecified):
+
+```
+?[department, choice(name)] := *employee{department, name}
+```
+
+**`choice_rand`** — returns a uniformly random value from the group (reservoir sampling):
+
+```
+?[choice_rand(name)] := *user{name}
+```
+
+## Cost-aware aggregations
+
+These aggregations operate on `[value, cost]` pairs where `cost` must be numeric.
+
+**`min_cost`** — returns the `[value, cost]` pair with the minimum cost:
+
+```
+?[to, min_cost([path, dist])] := *weighted_route{fr: 'FRA', to, dist},
+                                  path = ['FRA', to]
+```
+
+**`smallest_by`** — returns the value (not the cost) associated with the minimum cost:
+
+```
+?[smallest_by([name, score])] := *candidate{name, score}
+```
+
+**`latest_by`** — returns the value associated with the maximum cost:
+
+```
+?[latest_by([event, timestamp])] := *log{event, timestamp}
+```
+
+## Path aggregation
+
+**`shortest`** — accepts list-valued inputs and returns the shortest list (by element count):
+
+```
+?[to, shortest(path)] := *route{fr: 'FRA', to}, path = ['FRA', to]
+```
+
+This is the key aggregation used in recursive shortest-path queries. See [recursion](/cozoscript/recursion) for a full example.
+
+## Boolean aggregations
+
+**`and`** — returns `true` if all values are `true`:
+
+```
+?[and(active)] := *flag{feature, active}
+```
+
+**`or`** — returns `true` if any value is `true`:
+
+```
+?[or(has_error)] := *check{service, has_error}
+```
+
+## Bitwise aggregations
+
+These operate on `Bytes` values of equal length.
+
+**`bit_and`** — bitwise AND across all byte arrays:
+
+```
+?[bit_and(permissions)] := *user_perm{role, permissions}
+```
+
+**`bit_or`** — bitwise OR:
+
+```
+?[bit_or(capabilities)] := *device{fleet, capabilities}
+```
+
+**`bit_xor`** — bitwise XOR:
+
+```
+?[bit_xor(checksum)] := *shard{table, checksum}
+```
+
+## Meet aggregations and recursion
+
+Aggregations marked as **meet** (`is_meet = true`) satisfy the _semi-positive_ requirement and can be used inside recursive rules. These are:
+
+`min`, `max`, `min_cost`, `shortest`, `and`, `or`, `choice`, `bit_and`, `bit_or`, `union`, `intersection`
+
+Non-meet aggregations (`count`, `sum`, `mean`, `collect`, etc.) cannot be used directly in a recursive rule head because they are not monotone—their value can decrease as more facts are derived, which breaks the fixpoint computation.
+
+<Info>
+If you need `count` or `sum` inside a recursive computation, structure the query so the recursion produces the base facts and a separate non-recursive rule aggregates them.
+</Info>
+
+## Reference table
+
+| Function | Input type | Returns | Meet |
+|---|---|---|---|
+| `count` | Any | Int | No |
+| `count_unique` | Any | Int | No |
+| `sum` | Numeric | Float | No |
+| `product` | Numeric | Float | No |
+| `min` | Numeric | Numeric | Yes |
+| `max` | Numeric | Numeric | Yes |
+| `mean` | Numeric | Float | No |
+| `variance` | Numeric | Float | No |
+| `std_dev` | Numeric | Float | No |
+| `collect` | Any | List | No |
+| `unique` | Any | List (deduped) | No |
+| `union` | List | List (deduped) | Yes |
+| `intersection` | List | List | Yes |
+| `group_count` | Any | List of `[val, int]` | No |
+| `choice` | Any | Any | Yes |
+| `choice_rand` | Any | Any | No |
+| `min_cost` | `[Any, Numeric]` | `[Any, Numeric]` | Yes |
+| `smallest_by` | `[Any, Any]` | Any | No |
+| `latest_by` | `[Any, Any]` | Any | No |
+| `shortest` | List | List | Yes |
+| `and` | Bool | Bool | Yes |
+| `or` | Bool | Bool | Yes |
+| `bit_and` | Bytes | Bytes | Yes |
+| `bit_or` | Bytes | Bytes | Yes |
+| `bit_xor` | Bytes | Bytes | No |

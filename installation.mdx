@@ -1,0 +1,271 @@
+---
+title: "Installing CozoDB in your environment"
+description: "Install CozoDB for Python, Node.js, Rust, Java, or as a standalone HTTP server. Covers storage backend selection and available Cargo feature flags."
+---
+
+CozoDB 0.7.6 ships pre-built binaries for the most common platforms. Choose the tab below for your language or environment, then refer to the platform support table to confirm your target is covered.
+
+<Tabs>
+  <Tab title="Python">
+    Install the `pycozo` package from PyPI. The `[embedded]` extra pulls in the native `cozo_embedded` bindings:
+
+    ```bash
+    pip install pycozo[embedded]
+    ```
+
+    If you only need the client (connecting to a standalone CozoDB HTTP server) without embedding, omit the extra:
+
+    ```bash
+    pip install pycozo
+    ```
+
+    **Basic usage:**
+
+    ```python
+    from pycozo.client import Client
+
+    # In-memory database (default)
+    db = Client()
+
+    # SQLite persistent database
+    # db = Client('sqlite', 'my_database.db', {})
+
+    result = db.run("?[a] := a in [1, 2, 3]")
+    print(result)
+    ```
+
+    Create a relation and insert data:
+
+    ```python
+    db.run(":create user {id: Int => name: String, email: String}")
+
+    db.run(
+        "?[id, name, email] <- $rows :put user {id => name, email}",
+        {"rows": [[1, "Alice", "alice@example.com"], [2, "Bob", "bob@example.com"]]}
+    )
+
+    result = db.run("?[name, email] := *user{name, email}")
+    print(result)
+    ```
+
+    <Note>
+    Always use parameterized queries (`$param`) instead of string concatenation to avoid injection issues.
+    </Note>
+  </Tab>
+
+  <Tab title="Node.js">
+    Install the `cozo-node` package from npm:
+
+    ```bash
+    npm install cozo-node
+    ```
+
+    **Basic usage:**
+
+    ```javascript
+    const { CozoDb } = require('cozo-node')
+
+    // In-memory database (default)
+    const db = new CozoDb()
+
+    db.run("?[a] := a in [1, 2, 3]").then(console.log)
+    ```
+
+    Create a relation and insert data:
+
+    ```javascript
+    const { CozoDb } = require('cozo-node')
+
+    async function main() {
+        const db = new CozoDb()
+
+        await db.run(":create user {id: Int => name: String, email: String}")
+
+        await db.run(
+            "?[id, name, email] <- $rows :put user {id => name, email}",
+            { rows: [[1, "Alice", "alice@example.com"], [2, "Bob", "bob@example.com"]] }
+        )
+
+        const result = await db.run("?[name, email] := *user{name, email}")
+        console.log(result)
+
+        // Always close the database when done to release native resources
+        db.close()
+    }
+
+    main().catch(err => console.error(err.display || err.message))
+    ```
+
+    Use a persistent RocksDB database by passing the engine and path:
+
+    ```javascript
+    const db = new CozoDb('rocksdb', './my_database')
+    ```
+
+    <Warning>
+    Call `db.close()` when you are done with a database instance. Simply letting the variable go out of scope is not sufficient — native resources will linger until the process exits.
+    </Warning>
+  </Tab>
+
+  <Tab title="Rust">
+    Add `cozo` to your `Cargo.toml`. Enable the storage backends you need via feature flags:
+
+    ```toml
+    [dependencies]
+    cozo = { version = "0.7.6", features = ["storage-rocksdb"] }
+    ```
+
+    **Basic usage:**
+
+    ```rust
+    use cozo::*;
+
+    fn main() {
+        // Create an in-memory database
+        let db = DbInstance::new("mem", "", Default::default()).unwrap();
+
+        let script = "?[a] := a in [1, 2, 3]";
+        let result = db
+            .run_script(script, Default::default(), ScriptMutability::Immutable)
+            .unwrap();
+
+        println!("{:?}", result);
+    }
+    ```
+
+    Create a persistent RocksDB database:
+
+    ```rust
+    use cozo::*;
+
+    fn main() {
+        let db = DbInstance::new("rocksdb", "./my_database", Default::default()).unwrap();
+
+        db.run_script(
+            ":create user {id: Int => name: String, email: String}",
+            Default::default(),
+            ScriptMutability::Mutable,
+        )
+        .unwrap();
+    }
+    ```
+
+    **Available feature flags:**
+
+    | Feature | Description |
+    |---|---|
+    | `storage-rocksdb` | Enable RocksDB persistent storage |
+    | `storage-sqlite` | Enable SQLite persistent storage |
+    | `storage-sled` | Enable Sled persistent storage |
+    | `storage-tikv` | Enable TiKV distributed storage |
+    | `compact` | Optimize binary size for embedded use |
+    | `graph-algo` | Include built-in graph algorithms (PageRank, Dijkstra, etc.) |
+
+    <Tip>
+    You can run multiple storage engines in the same process — each `DbInstance` is independent.
+    </Tip>
+  </Tab>
+
+  <Tab title="Standalone server">
+    Download the pre-built binary for your platform from the [GitHub releases page](https://github.com/cozodb/cozo/releases). Files named `cozo-*` are the standard build; files named `cozo_all-*` include TiKV and additional backends.
+
+    Start an in-memory server (non-persistent):
+
+    ```bash
+    ./cozo server
+    ```
+
+    Start a persistent server backed by RocksDB:
+
+    ```bash
+    ./cozo server -e rocksdb -d my_database
+    ```
+
+    The server listens on `http://127.0.0.1:9070` by default. Send queries via HTTP POST:
+
+    ```bash
+    curl -X POST http://127.0.0.1:9070/text-query \
+      -H 'Content-Type: application/json' \
+      -d '{"script": "?[a] := a in [1, 2, 3]", "params": {}}'
+    ```
+
+    The response is JSON with `ok`, `headers`, and `rows` fields.
+
+    Use the built-in REPL for interactive queries:
+
+    ```bash
+    ./cozo repl -e rocksdb -d my_database
+    ```
+
+    <Warning>
+    CozoDB is designed for trusted environments. If you bind to a non-loopback address, the server generates an auth token and requires it in the `x-cozo-auth` HTTP header. This is a safeguard against accidental exposure, not a production security measure. Set up your own firewall, TLS, and proxy for production deployments.
+    </Warning>
+  </Tab>
+
+  <Tab title="Java / Clojure">
+    Add the Maven dependency to your `pom.xml`:
+
+    ```xml
+    <dependency>
+      <groupId>io.github.cozodb</groupId>
+      <artifactId>cozo_java</artifactId>
+      <version>0.7.6</version>
+    </dependency>
+    ```
+
+    For Clojure, use the `cozo-clj` artifact instead:
+
+    ```xml
+    <dependency>
+      <groupId>io.github.cozodb</groupId>
+      <artifactId>cozo-clj</artifactId>
+      <version>0.7.6</version>
+    </dependency>
+    ```
+
+    Or with Leiningen/deps.edn:
+
+    ```clojure
+    io.github.cozodb/cozo-clj {:mvn/version "0.7.6"}
+    ```
+
+    Refer to the [cozo-lib-java](https://github.com/cozodb/cozo-lib-java) and [cozo-clj](https://github.com/cozodb/cozo-clj) repositories for API usage examples.
+  </Tab>
+</Tabs>
+
+## Platform and storage support
+
+The table below lists all officially supported environments. The **Storage** column uses single-letter codes: **M** = in-memory, **Q** = SQLite, **R** = RocksDB, **S** = Sled, **T** = TiKV.
+
+| Language / Environment | Platform support | Storage |
+|---|---|---|
+| Python | Linux x86_64, Mac ARM64/x86_64, Windows x86_64 | M Q R |
+| Node.js | Linux x86_64/ARM64, Mac ARM64/x86_64, Windows x86_64 | M Q R |
+| Web browser (WASM) | Modern browsers with WebAssembly support | M |
+| Java (JVM) | Linux x86_64/ARM64, Mac ARM64/x86_64, Windows x86_64 | M Q R |
+| Clojure (JVM) | Linux x86_64/ARM64, Mac ARM64/x86_64, Windows x86_64 | M Q R |
+| Android | ARM64, ARMv7, x86_64, x86 | M Q |
+| iOS / macOS (Swift) | iOS ARM64 + simulators, Mac ARM64/x86_64 | M Q |
+| Rust | Any platform with `std` support (source only) | M Q R S T |
+| Go | Linux x86_64/ARM64, Mac ARM64/x86_64, Windows x86_64 | M Q R |
+| C / C++ (C FFI) | Linux x86_64/ARM64, Mac ARM64/x86_64, Windows x86_64 | M Q R |
+| Standalone HTTP server | Linux x86_64/ARM64, Mac ARM64/x86_64, Windows x86_64 | M Q R S T |
+
+## Choosing a storage backend
+
+<CardGroup cols={2}>
+  <Card title="SQLite — recommended default" icon="database">
+    Use SQLite for most embedded applications. It requires no extra dependencies, is well-tested, and its file format doubles as CozoDB's portable backup format.
+  </Card>
+  <Card title="RocksDB — high concurrency" icon="bolt">
+    Use RocksDB when you need high write throughput or many concurrent readers. It supports an `options` file inside the data directory for fine-grained tuning.
+  </Card>
+</CardGroup>
+
+<Info>
+For Rust users, the [cozo docs.rs page](https://docs.rs/cozo/) contains detailed guidance on storage selection and feature flag combinations that applies to all language bindings, not just Rust.
+</Info>
+
+<Note>
+Even if your platform is not in the official support table, you may be able to compile CozoDB yourself with minor code adjustments. The C FFI layer (used directly by Go and available to any language with C interop) is a good starting point for new language integrations.
+</Note>

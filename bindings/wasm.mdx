@@ -1,0 +1,137 @@
+---
+title: "Using CozoDB in the Browser with WebAssembly"
+description: "Run CozoDB entirely in the browser via the cozo-lib-wasm npm package, with in-memory storage, near-native query speed, and no server required."
+---
+
+`cozo-lib-wasm` compiles CozoDB to WebAssembly so it can run entirely inside a browser tab. No server, no installation — the database lives in the page's memory alongside your JavaScript. This makes it ideal for interactive demos, offline-capable apps, and client-side data processing.
+
+<Tip>
+  Try CozoDB right now in the browser — no installation needed: [https://www.cozodb.org/wasm-demo/](https://www.cozodb.org/wasm-demo/)
+</Tip>
+
+## Installation
+
+```bash
+npm install cozo-lib-wasm
+```
+
+Alternatively, download `cozo_wasm-<VERSION>-wasm32-unknown-unknown.zip` from the [releases page](https://github.com/cozodb/cozo/releases) and include the `.js` and `.wasm` files directly in your project.
+
+## Storage
+
+The WASM build uses **in-memory storage only** (`M` backend). There is no persistent storage available in the browser context — all data is lost when the page is closed or refreshed.
+
+| Backend | Available in WASM |
+|---|---|
+| `mem` (in-memory) | Yes |
+| `sqlite` | No |
+| `rocksdb` | No |
+
+## Basic Usage
+
+Import and initialise the WASM module, then create a `CozoDb` instance. The `init()` call is asynchronous — the database can only be used after the returned promise resolves.
+
+```javascript
+import init, { CozoDb } from "cozo-lib-wasm";
+
+let db;
+
+init().then(() => {
+    db = CozoDb.new();
+
+    // Run a simple query
+    const result = db.run("?[a] := a in [1, 2, 3]", "{}");
+    console.log(JSON.parse(result));
+    // { headers: ['a'], rows: [[1], [2], [3]], ok: true }
+});
+```
+
+## API
+
+The WASM API is **synchronous** and all parameters and return values are strings (JSON):
+
+```typescript
+export class CozoDb {
+    /** Release memory. Call when done. */
+    free(): void;
+
+    /** Create a new in-memory CozoDB instance. */
+    static new(): CozoDb;
+
+    /**
+     * Run a CozoScript query.
+     * @param script  The CozoScript to execute.
+     * @param params  A JSON object string of query parameters. Pass "{}" if none.
+     * @returns       A JSON string with { headers, rows, ok } or an error object.
+     */
+    run(script: string, params: string): string;
+
+    /**
+     * Export relations to JSON.
+     * @param data  A JSON string: { "relations": ["rel1", "rel2"] }
+     */
+    export_relations(data: string): string;
+
+    /**
+     * Import data into existing relations.
+     * Note: triggers are NOT fired during import.
+     * @param data  A JSON string in the same format returned by export_relations.
+     */
+    import_relations(data: string): string;
+}
+```
+
+### Example: query with parameters
+
+```javascript
+const resultJson = db.run(
+    "?[name] := name = $name",
+    JSON.stringify({ name: "Alice" })
+);
+const result = JSON.parse(resultJson);
+console.log(result.rows); // [["Alice"]]
+```
+
+### Example: export and import
+
+```javascript
+// Export the 'log' relation
+const exported = JSON.parse(
+    db.export_relations(JSON.stringify({ relations: ['log'] }))
+);
+
+// Import into the same (or another) db instance
+db.import_relations(JSON.stringify(exported.data));
+```
+
+## Performance
+
+The WASM build runs at near-native speed for most CozoDB operations. It is built with `compact-single-threaded` and `wasm` Cargo features, and the published package was compiled with link-time optimisation (`CARGO_PROFILE_RELEASE_LTO=fat`).
+
+<Warning>
+  The WASM API is fully synchronous. Long-running queries **block the main thread**. If you expect heavy computations, run CozoDB in a [Web Worker](https://developer.mozilla.org/en-US/docs/Web/API/Web_Workers_API). Note that the published ES module format may not work in web workers across all browsers — check the `"Support for ECMAScript modules"` row in the [Worker compatibility table](https://developer.mozilla.org/en-US/docs/Web/API/Worker/Worker#browser_compatibility).
+</Warning>
+
+## Building from Source
+
+You need [Rust](https://rustup.rs/), [Node.js with npm](https://nodejs.org/), and [wasm-pack](https://github.com/rustwasm/wasm-pack).
+
+```bash
+# From the cozo-lib-wasm directory
+export CARGO_PROFILE_RELEASE_LTO=fat
+wasm-pack build --target web --release
+```
+
+The `--target web` flag is required for the usage pattern shown above. To use CozoDB in a web worker across all browsers, use `--target no-modules` instead and add the necessary glue code.
+
+The relevant Cargo features for a minimal WASM build are `compact-single-threaded` and `wasm`:
+
+```toml
+[features]
+compact-single-threaded = ["minimal", "requests", "graph-algo"]
+wasm = ["uuid/js", "dep:js-sys"]
+```
+
+<Note>
+  For Node.js use, prefer [`cozo-node`](/bindings/nodejs) over the WASM package. Native code is significantly faster than WASM for all non-trivial workloads.
+</Note>

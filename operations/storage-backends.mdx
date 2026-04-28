@@ -1,0 +1,135 @@
+---
+title: "CozoDB storage backends: choosing the right engine"
+description: "Compare in-memory, SQLite, RocksDB, Sled, and TiKV storage backends for CozoDB and learn when each is the right choice for embedded or server deployments."
+keywords: ["storage backends", "RocksDB", "SQLite", "TiKV", "Sled", "in-memory", "DbInstance"]
+---
+
+CozoDB decouples its query engine from its storage layer. The query engine — Datalog
+compilation, transaction management, graph algorithms — is identical regardless of which
+backend you choose. The backend only provides a key-value store with range-scan
+capabilities, which means you can switch engines by changing a single argument when you
+create the database instance.
+
+## Backend overview
+
+| Backend key | Letter | Description |
+|-------------|--------|-------------|
+| `mem` | M | In-memory, non-persistent. Fastest option; data is lost when the process exits. |
+| `sqlite` | Q | SQLite-backed persistent storage. Low resource requirements, easy setup, moderate concurrency. |
+| `rocksdb` | R | RocksDB-backed persistent storage. High throughput, high concurrency, tunable. |
+| `sled` | S | Sled-backed storage. Experimental; generally slower than SQLite. |
+| `tikv` | T | TiKV distributed storage. For data sets that do not fit on a single machine. |
+
+The letter codes match the **Storage** column in the install matrix — for example,
+Python and Node.js ship with `MQR` support (in-memory, SQLite, RocksDB).
+
+## When to use each backend
+
+<CardGroup cols={2}>
+  <Card title="mem — in-memory" icon="bolt">
+    Use for testing, CI pipelines, or workloads where persistence is not required.
+    No setup, no files, fastest possible read/write latency. Data does not survive
+    process exit.
+  </Card>
+  <Card title="sqlite — embedded persistent" icon="database">
+    Use for desktop applications, mobile apps, or single-user tools where simplicity
+    matters more than concurrency. SQLite compiles easily on every platform and uses
+    minimal disk space and memory.
+  </Card>
+  <Card title="rocksdb — high-performance persistent" icon="gauge-high">
+    Use for server deployments expecting significant concurrent load or large data
+    volumes. RocksDB supports an extremely high level of concurrency and is the
+    recommended backend for production services. It takes longer to compile and
+    uses more resources than SQLite.
+  </Card>
+  <Card title="sled — experimental" icon="flask">
+    Avoid for production use. Sled is included for experimentation but is generally
+    slower than SQLite and may not be stable. It also does not support time travel.
+    Prefer RocksDB for any workload where you would otherwise consider Sled.
+  </Card>
+  <Card title="tikv — distributed" icon="server">
+    Use only when your data genuinely does not fit on a single machine. TiKV is orders
+    of magnitude slower than every other backend for graph traversals due to network
+    round-trips. Point-lookup queries perform acceptably, but recursive Datalog and
+    whole-graph algorithms will be severely bottlenecked by network overhead.
+  </Card>
+</CardGroup>
+
+## Creating a database instance
+
+Pass the backend key as the first argument to `DbInstance::new` (Rust), `CozoDb`
+(Node.js / JavaScript), or `Client` (Python).
+
+<CodeGroup>
+
+```rust rust
+use cozo::DbInstance;
+
+let db = DbInstance::new("rocksdb", "/path/to/db", Default::default()).unwrap();
+```
+
+```javascript node.js
+import { CozoDb } from 'cozo-node';
+
+const db = new CozoDb('rocksdb', '/path/to/db');
+```
+
+```python python
+from pycozo.client import Client
+
+db = Client('rocksdb', '/path/to/db')
+```
+
+</CodeGroup>
+
+For the `mem` backend the path argument is ignored. For `tikv` the path argument is also
+ignored; pass the TiKV PD endpoint addresses in the options string instead.
+
+## RocksDB options file
+
+RocksDB exposes hundreds of tuning knobs. CozoDB lets you supply a
+[RocksDB options file](https://github.com/facebook/rocksdb/wiki/RocksDB-Options-File)
+by placing a file named `options` inside the database directory.
+
+<Steps>
+  <Step title="Start the database once">
+    Run your application (or the `cozo` standalone executable) with the RocksDB backend.
+    CozoDB creates the database directory and writes an initial options file.
+  </Step>
+  <Step title="Copy the generated options file">
+    Inside the database directory you will find a `data/` subdirectory containing a file
+    named `OPTIONS-XXXXXX`. Copy it to `options` in the database root:
+
+    ```bash
+    cp /path/to/db/data/OPTIONS-000123 /path/to/db/options
+    ```
+  </Step>
+  <Step title="Edit and restart">
+    Adjust numerical parameters you understand, then restart the process. CozoDB logs a
+    message confirming the options file was loaded.
+  </Step>
+</Steps>
+
+<Warning>
+  Improperly set RocksDB options can cause misbehavior or data corruption. Limit changes
+  to options you understand, and test on a non-production copy first.
+</Warning>
+
+## SQLite as the interchange format
+
+SQLite occupies a special role beyond its storage function: it is the format used for
+backup files regardless of which backend is active. A backup taken from a RocksDB
+database produces a standard SQLite file, and that file can be restored into any other
+backend. See [Backing up and restoring](/operations/backup-restore) for details.
+
+<Note>
+  SQLite backup files store data in CozoDB's internal binary encoding. They cannot be
+  queried directly with standard SQL tooling — access must go through CozoDB's own
+  decoding process.
+</Note>
+
+<Warning>
+  The Sled backend is experimental and not recommended for production. The TiKV backend
+  is orders of magnitude slower than all other backends for graph traversals. Neither
+  Sled nor TiKV supports time travel queries.
+</Warning>

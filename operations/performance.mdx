@@ -1,0 +1,171 @@
+---
+title: "CozoDB performance tuning and benchmarks"
+description: "Benchmark numbers, RocksDB options file tuning, jemalloc and io-uring features, and query-level tips for maximising CozoDB throughput."
+keywords: ["performance", "benchmarks", "RocksDB tuning", "jemalloc", "io-uring", "PageRank", "OLTP", "OLAP"]
+---
+
+CozoDB is designed to be performant across a wide range of workloads. The numbers below
+were measured on a 2020 Mac Mini (Apple M1) using the RocksDB backend and represent a
+baseline for typical production hardware. Your results will vary depending on data shape,
+query complexity, and hardware, but they give a useful frame of reference when choosing
+a backend or deciding whether to tune further.
+
+## Benchmark numbers
+
+### OLTP (online transactional processing)
+
+Measured on a relation with 1.6 million rows:
+
+| Workload | Throughput | Peak memory |
+|----------|-----------|-------------|
+| Mixed read / write / update | ~100,000 QPS | ~50 MB |
+| Read-only | >250,000 QPS | ~50 MB |
+
+### Backup and restore
+
+| Operation | Speed |
+|-----------|-------|
+| Backup | ~1,000,000 rows / second |
+| Restore | ~400,000 rows / second |
+
+Both figures are insensitive to individual relation size.
+
+### OLAP (analytical scans)
+
+Scanning a 1.6 million row table takes approximately **1 second** (within a factor of 2
+depending on the specific operations). Query time scales roughly with the number of rows
+touched; memory usage is determined mainly by the size of the result set.
+
+### Graph traversal
+
+| Query | Time |
+|-------|------|
+| Two-hop traversal on a graph with 1.6M vertices and 31M edges | &lt;1 ms |
+
+### PageRank
+
+| Graph size | Time |
+|-----------|------|
+| 10K vertices, 120K edges | ~50 ms |
+| 100K vertices, 1.7M edges | ~1 second |
+| 1.6M vertices, 32M edges | ~30 seconds |
+
+## Storage backend choice
+
+The backend you choose is the single largest performance variable for most workloads.
+
+<CardGroup cols={2}>
+  <Card title="RocksDB" icon="gauge-high">
+    Best overall throughput and concurrency. Recommended for all production server
+    deployments. Enables RocksDB options file tuning for advanced workloads.
+  </Card>
+  <Card title="SQLite" icon="database">
+    Good for single-user or low-concurrency deployments. Lower resource usage than
+    RocksDB but does not scale to high concurrent write loads.
+  </Card>
+  <Card title="mem (in-memory)" icon="bolt">
+    Fastest for ephemeral workloads. No I/O overhead. Suitable for benchmarking
+    query logic without storage noise.
+  </Card>
+  <Card title="TiKV" icon="network-wired">
+    Avoid for graph traversals. Network round-trips make recursive Datalog and
+    whole-graph algorithms orders of magnitude slower than local backends. Use only
+    when data exceeds single-machine capacity.
+  </Card>
+</CardGroup>
+
+See [Storage backends](/operations/storage-backends) for a full comparison.
+
+## RocksDB options file
+
+RocksDB exposes hundreds of tuning parameters. CozoDB reads a
+[RocksDB options file](https://github.com/facebook/rocksdb/wiki/RocksDB-Options-File)
+named `options` placed inside the database directory.
+
+<Steps>
+  <Step title="Run the database once to generate defaults">
+    Start CozoDB with the RocksDB backend. The engine writes an initial options file to
+    `data/OPTIONS-XXXXXX` inside the database directory.
+  </Step>
+  <Step title="Copy the generated file as your base">
+    ```bash
+    cp /path/to/db/data/OPTIONS-000123 /path/to/db/options
+    ```
+
+    Using the generated file as a starting point means your customisations are layered
+    on top of a known-good baseline for your version of RocksDB.
+  </Step>
+  <Step title="Adjust numerical parameters conservatively">
+    Tune values such as `write_buffer_size`, `max_write_buffer_number`, or
+    `block_cache_size` based on your available memory and write patterns. Avoid
+    changing options whose semantics you do not understand.
+  </Step>
+  <Step title="Restart and verify">
+    If the `cozo` standalone executable is used, it logs a confirmation message when
+    the options file is activated. Monitor error logs after restart.
+  </Step>
+</Steps>
+
+<Warning>
+  Improperly set RocksDB options can cause database misbehavior or silent data
+  corruption. Test changes on a non-production copy before applying them to
+  live data.
+</Warning>
+
+## Compile-time features
+
+Two optional Cargo features can improve performance depending on your deployment environment.
+
+### jemalloc
+
+The `jemalloc` feature replaces the system allocator with
+[jemalloc](https://github.com/jemalloc/jemalloc), which can improve throughput
+— sometimes substantially — for allocation-heavy workloads. Results vary by use case,
+so benchmark before committing.
+
+Enable it in `Cargo.toml`:
+
+```toml
+cozo = { version = "...", features = ["jemalloc"] }
+```
+
+<Note>
+  The `jemalloc` feature is intended for desktop and server environments. It may break
+  builds on less-tested platforms. None of the official prebuilt binaries include it.
+</Note>
+
+### io-uring (Linux only)
+
+The `io-uring` feature enables Linux io-uring support for the RocksDB storage backend,
+which can reduce I/O latency on supported kernels.
+
+```toml
+cozo = { version = "...", features = ["io-uring"] }
+```
+
+## Query-level optimisation
+
+### Use canned algorithms for large graph computations
+
+For computations like PageRank or shortest paths on large graphs, prefer the built-in
+fixed rules (`<~ PageRank(...)`, `<~ ShortestPathDijkstra(...)`) over hand-written
+recursive Datalog. The canned implementations are optimised in Rust and avoid the overhead
+of iterative Datalog evaluation.
+
+```datalog
+?[node, rank] <~ PageRank(*edge[])
+```
+
+See [Graph algorithms](/features/graph-algorithms) for the full list of available fixed rules.
+
+### HNSW memory efficiency
+
+HNSW vector indices use close to the minimum amount of memory during search. Memory is
+freed as soon as each search completes through Rust's RAII mechanism. This makes vector
+search practical on memory-constrained systems without pre-allocating a large cache.
+
+### Prefer parametrised queries
+
+Always use `$param` parameters instead of string concatenation when building queries
+dynamically. This avoids repeated parse and compile overhead for queries that share the
+same structure.

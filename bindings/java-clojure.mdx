@@ -1,0 +1,174 @@
+---
+title: "Using CozoDB from Java and Clojure on the JVM"
+description: "Add CozoDB to Java via Maven or Gradle, use the CozoDb class, integrate with Clojure via cozo-clj, and deploy on Android with cozo_android."
+---
+
+CozoDB provides first-class JVM support through two Maven Central artifacts: `cozo_java` for Java and any JVM language, and `cozo-clj` for idiomatic Clojure usage. Both ship with prebuilt native libraries for Linux (x86\_64, ARM64), macOS (ARM64, x86\_64), and Windows (x86\_64). A separate `cozo_android` artifact covers Android (ARM64, ARMv7, x86\_64, x86).
+
+## Java
+
+### Adding the dependency
+
+<CodeGroup>
+
+```xml Maven
+<dependency>
+    <groupId>io.github.cozodb</groupId>
+    <artifactId>cozo_java</artifactId>
+    <version>0.7.6</version>
+</dependency>
+```
+
+```groovy Gradle (Groovy)
+implementation 'io.github.cozodb:cozo_java:0.7.6'
+```
+
+```kotlin Gradle (Kotlin)
+implementation("io.github.cozodb:cozo_java:0.7.6")
+```
+
+</CodeGroup>
+
+### Basic usage
+
+The Java library exposes a `CozoDb` class whose methods correspond directly to the Rust `DbInstance` API. All query results are returned as JSON strings.
+
+```java
+import org.cozodb.CozoDb;
+
+public class Main {
+    public static void main(String[] args) throws Exception {
+        // In-memory database
+        CozoDb db = new CozoDb("mem", "", "{}");
+
+        // Run a query — result is a JSON string
+        String result = db.runQuery("?[a] := a in [1, 2, 3]", "{}");
+        System.out.println(result);
+        // {"headers":["a"],"rows":[[1],[2],[3]],"ok":true}
+
+        // Create a relation and insert data
+        db.runQuery(":create user {id: Int => name: String}", "{}");
+        db.runQuery(
+            "?[id, name] <- [[1, $name]] :put user {id => name}",
+            "{\"name\": \"Alice\"}"
+        );
+
+        // Query with parameters
+        String users = db.runQuery(
+            "?[id, name] := *user{id, name}, id = $id",
+            "{\"id\": 1}"
+        );
+        System.out.println(users);
+
+        db.close();
+    }
+}
+```
+
+### Available operations
+
+| Method | Description |
+|---|---|
+| `runQuery(script, paramsJson)` | Execute CozoScript; params as a JSON object string |
+| `exportRelations(relationsJson)` | Export named relations to JSON |
+| `importRelations(dataJson)` | Import data into existing relations |
+| `backup(path)` | Backup to an SQLite file |
+| `restore(path)` | Restore from an SQLite backup |
+| `importFromBackup(payloadJson)` | Selectively import relations from a backup |
+| `close()` | Release native resources |
+
+<Note>
+  The `params` argument must always be a valid JSON object string. Pass `"{}"` when there are no parameters.
+</Note>
+
+### Storage backends
+
+| Code | Backend | Description |
+|---|---|---|
+| `M` | `"mem"` | In-memory, non-persistent |
+| `Q` | `"sqlite"` | SQLite on disk |
+| `R` | `"rocksdb"` | RocksDB on disk |
+
+## Clojure
+
+### Adding the dependency
+
+<CodeGroup>
+
+```clojure deps.edn
+{:deps {io.github.cozodb/cozo-clj {:mvn/version "0.7.6"}}}
+```
+
+```clojure project.clj (Leiningen)
+:dependencies [[io.github.cozodb/cozo-clj "0.7.6"]]
+```
+
+</CodeGroup>
+
+### Basic usage
+
+`cozo-clj` wraps the Java API with idiomatic Clojure conventions. Query results are returned as Clojure data structures.
+
+```clojure
+(require '[cozo.core :as cozo])
+
+;; Open an in-memory database
+(def db (cozo/open "mem" "" {}))
+
+;; Run a query — returns {:headers [...] :rows [...]}
+(println (cozo/query db "?[a] := a in [1, 2, 3]" {}))
+
+;; Create a relation and insert a row
+(cozo/query db ":create person {name: String => age: Int}" {})
+(cozo/query db "?[name, age] <- [[$name, $age]] :put person {name => age}"
+            {:name "Alice" :age 30})
+
+;; Query with parameters
+(println (cozo/query db "?[name, age] := *person{name, age}, name = $name"
+                     {:name "Alice"}))
+
+(cozo/close db)
+```
+
+## Android
+
+For Android projects, use the `cozo_android` artifact instead of `cozo_java`. It includes native libraries for all common Android ABIs:
+
+<CodeGroup>
+
+```xml Maven
+<dependency>
+    <groupId>io.github.cozodb</groupId>
+    <artifactId>cozo_android</artifactId>
+    <version>0.7.6</version>
+</dependency>
+```
+
+```groovy Gradle (Groovy)
+implementation 'io.github.cozodb:cozo_android:0.7.6'
+```
+
+</CodeGroup>
+
+### Platform support
+
+| ABI | Supported |
+|---|---|
+| ARM64 (`aarch64`) | Yes |
+| ARMv7 (`armeabi-v7a`) | Yes |
+| x86\_64 | Yes |
+| x86 | Yes |
+
+### Storage on Android
+
+Only the `M` (in-memory) and `Q` (SQLite) backends are available in `cozo_android`. RocksDB is not included in the prebuilt binaries due to the complexity of cross-compilation; see the [source README](https://github.com/cozodb/cozo/tree/main/cozo-lib-java) if you need it.
+
+```java
+// SQLite on the device's internal storage
+String dbPath = context.getDatabasePath("cozo.db").getAbsolutePath();
+CozoDb db = new CozoDb("sqlite", dbPath, "{}");
+```
+
+<Tip>
+  For most mobile use cases, SQLite (`"sqlite"`) is the right choice — it is lightweight, well-tested, and supports all CozoDB features except the highest concurrency workloads.
+</Tip>

@@ -1,0 +1,128 @@
+---
+title: "Backing up and restoring a CozoDB database"
+description: "Back up any CozoDB storage backend to a portable SQLite file and restore it via the HTTP API, REPL commands, Node.js bindings, or the Rust API."
+keywords: ["backup", "restore", "SQLite", "import", "export", "HTTP API", "cozo-bin"]
+---
+
+CozoDB uses SQLite as its backup interchange format regardless of which storage backend
+is active. A RocksDB database, for example, produces a standard SQLite file when backed
+up, and that file can be restored into an in-memory, SQLite, or RocksDB instance. This
+means backups are always portable across backends.
+
+Backup speed is approximately **1 million rows per second**; restore speed is
+approximately **400,000 rows per second**, and both are insensitive to relation (table) size.
+
+<Note>
+  The `storage-sqlite` feature must be enabled at compile time for backup and restore
+  to be available. All official prebuilt binaries include it.
+</Note>
+
+## HTTP API
+
+The standalone `cozo` server exposes dedicated endpoints for backup and restore.
+
+### Create a backup
+
+```bash
+curl -X POST http://127.0.0.1:9070/backup \
+  -H 'Content-Type: application/json' \
+  -d '{"path": "/tmp/backup.db"}'
+```
+
+The path is resolved on the **server**. The server process must have write permission
+to the directory.
+
+### Restore from a backup
+
+```bash
+curl -X POST http://127.0.0.1:9070/import-from-backup \
+  -H 'Content-Type: application/json' \
+  -d '{"path": "/tmp/backup.db", "relations": ["user", "product"]}'
+```
+
+The `relations` array selects which relations to import from the backup file. The target
+database must be empty before restoring a full backup.
+
+<Warning>
+  Triggers are **not** run on import and import-from-backup operations. If you need
+  triggers to fire, use parametrised queries with `:put` instead.
+</Warning>
+
+## REPL commands
+
+When using the `cozo repl` interactive prompt, two meta-commands handle backup and restore:
+
+```
+%backup /path/to/backup.db
+```
+
+```
+%restore /path/to/backup.db
+```
+
+The restore command requires the current database to be empty.
+
+## Language bindings
+
+<Tabs>
+  <Tab title="Node.js">
+    ```javascript
+    // backup
+    await db.backup('/path/to/backup.db');
+
+    // restore (database must be empty)
+    await db.restore('/path/to/backup.db');
+    ```
+  </Tab>
+  <Tab title="Rust">
+    ```rust
+    // backup
+    db.backup_db("/path/to/backup.db").unwrap();
+
+    // restore (database must be empty)
+    db.restore_backup("/path/to/backup.db").unwrap();
+    ```
+  </Tab>
+</Tabs>
+
+## Exporting and importing individual relations
+
+For finer-grained data movement you can export and import individual relations as JSON
+rather than SQLite backup files.
+
+### HTTP API
+
+```bash
+# export relations named 'user' and 'product'
+curl http://127.0.0.1:9070/export/user,product
+
+# import the JSON returned by /export
+curl -X PUT http://127.0.0.1:9070/import \
+  -H 'Content-Type: application/json' \
+  -d '<json from /export>'
+```
+
+### Node.js
+
+```javascript
+// export
+const data = await db.exportRelations(['user', 'product']);
+
+// import
+await db.importRelations(data);
+```
+
+<Note>
+  As with backup restore, triggers are not run when importing data through these
+  endpoints or methods.
+</Note>
+
+## Summary of backup and restore methods
+
+| Method | Backup command | Restore command |
+|--------|---------------|-----------------|
+| HTTP API | `POST /backup` | `POST /import-from-backup` |
+| REPL | `%backup <file>` | `%restore <file>` |
+| Node.js | `db.backup(path)` | `db.restore(path)` |
+| Rust | `db.backup_db(path)` | `db.restore_backup(path)` |
+| Export/import (JSON) | `GET /export/{relations}` / `exportRelations([...])` | `PUT /import` / `importRelations(data)` |

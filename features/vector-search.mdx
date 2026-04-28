@@ -1,0 +1,201 @@
+---
+title: "HNSW vector search in CozoDB"
+description: "Create HNSW approximate nearest-neighbor indices on any relation and query them inline with Datalog, supporting Cosine, L2, and inner-product distances."
+keywords: ["HNSW", "vector search", "approximate nearest neighbor", "ANN", "embeddings", "Datalog"]
+---
+
+CozoDB integrates Hierarchical Navigable Small World (HNSW) vector indices directly into its
+Datalog engine. You create an index on a stored relation, then query it using the same
+unification syntax you use for regular relations — meaning vector similarity search composes
+freely with joins, filters, aggregations, and even recursive rules.
+
+## Creating an HNSW index
+
+Use the `::hnsw create` system command to attach an index to an existing relation.
+
+```datalog
+::hnsw create product:product_vec {
+    dim: 128,
+    dtype: F32,
+    fields: [description_vec],
+    distance: Cosine,
+    m: 50,
+    ef_construction: 20
+}
+```
+
+`product` is the base relation name; `product_vec` is the index name. Both are required.
+
+### Index options
+
+| Option | Required | Description |
+|--------|----------|-------------|
+| `dim` | Yes | Dimensionality of the vectors |
+| `dtype` | Yes | Element type: `F32`, `F64`, or `I8` |
+| `fields` | Yes | List of column names containing vectors |
+| `distance` | Yes | Distance metric: `Cosine`, `L2`, or `IP` (inner product) |
+| `m` | No | Number of bi-directional links per node (default 16) |
+| `ef_construction` | No | Size of the dynamic candidate list during construction (default 16) |
+| `filter` | No | CozoScript expression; only rows satisfying this are indexed |
+| `extend_candidates` | No | Extend the candidate set during construction (bool) |
+| `keep_pruned_connections` | No | Retain pruned edges for denser graphs (bool) |
+
+### Distance metrics
+
+| Metric | Option value | Use case |
+|--------|-------------|----------|
+| Cosine similarity | `Cosine` | Normalised embeddings (most common) |
+| Squared Euclidean | `L2` | When scale matters |
+| Inner product | `IP` | Pre-normalised embeddings, maximum inner product search |
+
+The distance is computed in full on `F32` and `F64` vectors. `I8` quantised vectors
+use the same formulae but with integer arithmetic internally.
+
+---
+
+## Querying the index
+
+Vector search unification uses the `~` prefix instead of `*`:
+
+```datalog
+?[dist, name] := ~product:product_vec{ name | query: q, bind_distance: dist, k: 10 },
+                 q = vec([0.1, 0.2, 0.3, ...])
+```
+
+The `query` option accepts any expression that evaluates to a vector. `bind_distance`
+names the output column that receives the computed distance. `k` is the number of
+approximate nearest neighbours to return.
+
+### Using a relation as the query pivot
+
+Any vector stored in another relation can serve as the pivot without materialising it first:
+
+```datalog
+?[dist, product_name] := *query_vec{ id: 1, vec: q },
+                         ~product:product_vec{ name: product_name |
+                             query: q,
+                             bind_distance: dist,
+                             k: 5
+                         }
+```
+
+---
+
+## Filtering within HNSW search
+
+Pass a filter expression inside the braces to restrict candidates:
+
+```datalog
+?[dist, name, category] := ~product:product_vec{ name, category |
+                                query: q,
+                                bind_distance: dist,
+                                k: 20,
+                                filter: category == 'electronics'
+                            },
+                            q = vec([...])
+```
+
+<Note>
+  Filtering is applied to candidate neighbours after retrieval. Setting a higher `k`
+  compensates for candidates removed by the filter.
+</Note>
+
+---
+
+## Multiple indices on the same relation
+
+You can create several HNSW indices on one relation, for example to index different
+vector columns or to maintain separate indices for different subsets of rows:
+
+```datalog
+::hnsw create product:title_vec {
+    dim: 128, dtype: F32, fields: [title_embedding], distance: Cosine
+}
+
+::hnsw create product:image_vec {
+    dim: 512, dtype: F32, fields: [image_embedding], distance: L2
+}
+```
+
+Each index is queried independently using its own `relation:index_name` identifier.
+
+---
+
+## HNSW in recursive Datalog
+
+Because vector unification is semantically equivalent to regular unification, you can
+use HNSW search inside recursive rules:
+
+```datalog
+similar[a, b] := *item{ id: a, vec: va },
+                 ~item:item_vec{ id: b | query: va, bind_distance: d, k: 5 },
+                 d < 0.1
+
+reachable[a, c] := similar[a, c]
+reachable[a, c] := reachable[a, b], similar[b, c]
+
+?[start, end] := reachable['item_42', end]
+```
+
+This enables graph-style traversal through the proximity structure of your embedding space.
+
+---
+
+## HNSW index as a proximity graph
+
+The HNSW data structure is itself a hierarchy of proximity graphs. CozoDB exposes these
+graphs as regular relations you can pass directly to any graph algorithm fixed rule:
+
+```datalog
+?[node, community] <~ CommunityDetectionLouvain(*product:product_vec{})
+```
+
+This lets you run community detection, PageRank, or any other algorithm directly over
+the vector proximity graph — no extra data preparation required.
+
+---
+
+## Concurrency and storage
+
+<Tabs>
+  <Tab title="Concurrency">
+    All mutations to an HNSW index are protected by Multi-Version Concurrency Control
+    (MVCC), the same mechanism used for regular relation writes. Concurrent readers
+    never block writers, and the index is never left in a corrupt state.
+
+    Multi-statement transactions work with HNSW indices in the same way they work
+    with ordinary relations.
+  </Tab>
+  <Tab title="Storage">
+    The index is stored as a regular relation on disk (for persistent backends). No
+    separate index file is required. During queries, only the pages needed for the
+    current search are loaded; memory is freed immediately after use through Rust's
+    RAII mechanism, making HNSW practical on memory-constrained devices.
+  </Tab>
+  <Tab title="Platform support">
+    HNSW is available on every CozoDB platform: standalone server, Python, NodeJS,
+    Clojure, Java, Android, iOS/macOS, and the browser WASM backend.
+  </Tab>
+</Tabs>
+
+---
+
+## Vector data types
+
+| Type | `dtype` value | Bytes per dimension |
+|------|--------------|---------------------|
+| 32-bit float | `F32` | 4 |
+| 64-bit float | `F64` | 8 |
+| 8-bit integer (quantised) | `I8` | 1 |
+
+Use `F32` unless you need the precision of `F64` or the compact footprint of `I8`.
+
+---
+
+## Removing an index
+
+```datalog
+::hnsw drop product:product_vec
+```
+
+Dropping an index does not affect the base relation.

@@ -1,0 +1,83 @@
+---
+title: "CozoDB: Transactional Relational-Graph-Vector Database"
+description: "CozoDB unifies relational, graph, and vector data in one embeddable database queried with Datalog. Supports MVCC, time travel, and five storage backends."
+---
+
+CozoDB is a general-purpose, transactional, relational database that uses **Datalog** (CozoScript) for queries, is **embeddable** in your application, and focuses on **graph** data and algorithms. It unifies relational tables, graph traversal, vector search, full-text search, and time travel under a single coherent query model — without forcing you to adopt a property-graph schema or learn a graph-specific query language.
+
+## Key differentiators
+
+<CardGroup cols={3}>
+  <Card title="Datalog queries" icon="code">
+    CozoScript, a dialect of Datalog, handles all relational queries and makes recursion natural. Rules compose like functions — unlike deeply-nested SQL `SELECT`s.
+  </Card>
+  <Card title="Embeddable" icon="microchip">
+    Runs in the same process as your application with no server setup. Works on mobile, in the browser via WASM, or as a standalone HTTP server.
+  </Card>
+  <Card title="Graph algorithms" icon="diagram-project">
+    Built-in canned algorithms — PageRank, Dijkstra, BFS, community detection — run directly inside queries. Two-hop traversal completes in under 1ms on large graphs.
+  </Card>
+  <Card title="Vector search" icon="magnifying-glass">
+    HNSW vector indices integrate natively with Datalog. Combine semantic search with recursive graph traversal in a single query.
+  </Card>
+  <Card title="Time travel" icon="clock-rotate-left">
+    Enable per-relation historical tracking to query data as it existed at any point in the past, without paying the cost for relations that don't need it.
+  </Card>
+  <Card title="MVCC transactions" icon="shield-check">
+    Multi-Version Concurrency Control protects all writes — including HNSW index updates — from corruption under concurrent access.
+  </Card>
+</CardGroup>
+
+## Architecture
+
+CozoDB is structured as three layers, each only calling into the layer below:
+
+| Layer | Role |
+|---|---|
+| Language / environment wrapper | Translates the Rust API into the target language (HTTP endpoints, async JS calls, Python bindings, etc.). For Rust, there is no wrapper. |
+| Query engine | Compiles and executes CozoScript. Manages schemas, transactions, functions, aggregations, and built-in graph algorithms. |
+| Storage engine | Provides a key-value store with range-scan capabilities and encodes rows in a [memcomparable binary format](https://github.com/facebook/mysql-5.6/wiki/MyRocks-record-format#memcomparable-format). |
+
+## Storage backends
+
+Each backend is an implementation of the storage `trait`. You choose a backend when you create the database instance — different backends can coexist in the same process.
+
+| Backend | Key | Persistence | Notes |
+|---|---|---|---|
+| In-memory | M | No | Fastest; data lost on process exit. Default for quickstart and WASM. |
+| SQLite | Q | Yes | Recommended for most embedded use cases. Also used as the portable backup format. |
+| RocksDB | R | Yes | Best for high concurrency and large datasets. Tunable via an `options` file. |
+| Sled | S | Yes | Pure-Rust alternative to RocksDB. Available in Rust builds only. |
+| TiKV | T | Yes | Distributed storage for multi-node deployments. Available in Rust builds and the `cozo_all` standalone binary. |
+
+<Note>
+The SQLite backend doubles as CozoDB's backup file format, allowing data exchange between databases with different backends.
+</Note>
+
+## Performance
+
+Measured on a 2020 Mac Mini using the RocksDB backend:
+
+| Workload | Result |
+|---|---|
+| Mixed read/write/update OLTP (1.6M-row relation) | ~100K QPS |
+| Read-only OLTP (1.6M-row relation) | >250K QPS, ~50MB peak memory |
+| OLAP full-table scan (1.6M rows) | ~1 second |
+| Backup throughput | ~1M rows/second |
+| Restore throughput | ~400K rows/second |
+| Two-hop graph traversal (1.6M vertices, 31M edges) | &lt;1ms |
+| PageRank (100K vertices, 1.7M edges) | ~1 second |
+| PageRank (1.6M vertices, 32M edges) | ~30 seconds |
+
+For the full performance writeup, see the [v0.3 release notes](https://docs.cozodb.org/en/latest/releases/v0.3.html).
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first CozoDB query in under a minute — no installation required.
+  </Card>
+  <Card title="Installation" icon="download" href="/installation">
+    Install CozoDB in Python, Node.js, Rust, Java, or run it as a standalone server.
+  </Card>
+</CardGroup>

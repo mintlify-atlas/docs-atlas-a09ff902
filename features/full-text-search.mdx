@@ -1,0 +1,192 @@
+---
+title: "Full-text search and MinHash-LSH in CozoDB"
+description: "Built-in FTS indices with configurable tokenizers and filters, plus MinHash-LSH for near-duplicate detection, both queryable inline from Datalog."
+keywords: ["full-text search", "FTS", "MinHash", "LSH", "near-duplicate", "tokenizer", "CozoScript"]
+---
+
+CozoDB ships two text-oriented index types that work the same way as HNSW vector indices:
+you create them on a stored relation, and query them using the tilde-prefix unification
+syntax inside ordinary Datalog rules. **Full-text search (FTS)** ranks documents by term
+relevance; **MinHash-LSH** detects near-duplicate documents by estimating Jaccard similarity.
+Both were introduced in CozoDB v0.7 alongside JSON value support.
+
+---
+
+## Full-text search
+
+### Creating an FTS index
+
+```datalog
+::fts create product:description_fts {
+    extractor: description,
+    tokenizer: Simple,
+    filters: [Lowercase, Stemmer('english'), Stopwords('english')]
+}
+```
+
+`product` is the base relation; `description_fts` is the index name. `extractor` names
+the column whose text content is indexed.
+
+### Tokenizers
+
+| Name | Description |
+|------|-------------|
+| `Simple` | Splits on whitespace and punctuation, lowercases |
+| `Whitespace` | Splits on whitespace only; preserves case |
+| `Raw` | Treats the entire string as a single token |
+| `NGram(min, max, prefix_only)` | Character n-grams between `min` and `max` length |
+| `Cangjie` | Word segmentation for CJK text using Jieba |
+
+`Cangjie` accepts an optional first argument (`"default"`, `"all"`, `"search"`, or
+`"unicode"`) and an optional boolean `use_hmm` flag for HMM-based segmentation.
+
+### Filters
+
+Filters are applied in order after tokenization.
+
+| Name | Description |
+|------|-------------|
+| `Lowercase` | Converts all tokens to lowercase |
+| `AlphaNumOnly` | Removes tokens containing non-alphanumeric characters |
+| `AsciiFolding` | Folds accented characters to their ASCII equivalents |
+| `Stemmer('language')` | Reduces tokens to their stem |
+| `Stopwords('language')` | Removes common stopwords for the given language |
+| `RemoveLong(max_length)` | Drops tokens longer than `max_length` characters |
+| `SplitCompoundWords(word_list)` | Splits compound words using a provided dictionary |
+
+**Supported Stemmer / Stopwords languages:** Arabic, Danish, Dutch, English, Finnish,
+French, German, Greek, Hungarian, Italian, Norwegian, Portuguese, Romanian, Russian,
+Spanish, Swedish, Tamil, Turkish.
+
+<Note>
+  Filter names are case-insensitive for `Lowercase` / `LowerCase` — both spellings
+  are accepted.
+</Note>
+
+### Querying with FTS
+
+```datalog
+?[score, name] := ~product:description_fts{ name |
+                      query: 'running shoes',
+                      bind_score: score,
+                      k: 10
+                  }
+```
+
+`bind_score` names the output column that receives the relevance score. `k` limits
+the number of results. Higher scores indicate a closer match.
+
+### Combining FTS with other relations
+
+FTS unification is just another Datalog body atom. You can join results with any other
+stored relation in the same rule:
+
+```datalog
+?[score, name, price, in_stock] :=
+    ~product:description_fts{ name | query: 'running shoes', bind_score: score, k: 20 },
+    *product{ name, price, in_stock },
+    in_stock == true
+
+:order -score
+:limit 10
+```
+
+### Updating and removing an FTS index
+
+```datalog
+::fts drop product:description_fts
+```
+
+Re-create the index with different settings by dropping and recreating it. The base
+relation is not affected.
+
+---
+
+## MinHash-LSH for near-duplicate detection
+
+### Creating an LSH index
+
+```datalog
+::lsh create document:content_lsh {
+    extractor: content,
+    tokenizer: Simple,
+    n_perm: 200,
+    target_threshold: 0.5,
+    num_bands: 10,
+    n_gram: 3
+}
+```
+
+| Option | Description |
+|--------|-------------|
+| `extractor` | Column whose text is hashed |
+| `tokenizer` | Tokenizer to apply before shingling (same names as FTS) |
+| `n_perm` | Number of hash permutations (higher = more accurate) |
+| `target_threshold` | Jaccard similarity threshold for reporting candidates |
+| `num_bands` | Number of LSH bands; controls the precision/recall tradeoff |
+| `n_gram` | Shingle size in tokens |
+
+The index stores MinHash signatures using XxHash32 permutations, and uses
+quadrature-based probability estimation to calibrate band boundaries.
+
+### Querying with LSH
+
+```datalog
+?[candidate] := ~document:content_lsh{ id |
+                    query: 'the quick brown fox jumps over the lazy dog',
+                    candidates: candidate
+                }
+```
+
+`candidates` receives the key(s) of documents whose MinHash signature is sufficiently
+similar to the query text. Results are approximate — you may wish to post-filter with
+an exact Jaccard computation on the candidate set.
+
+### Using an existing document as the query
+
+```datalog
+?[candidate] := *document{ id: 'doc_42', content: text },
+                ~document:content_lsh{ id |
+                    query: text,
+                    candidates: candidate
+                },
+                candidate != 'doc_42'
+```
+
+---
+
+## Language support summary
+
+<Tabs>
+  <Tab title="European languages">
+    Use the `Simple` or `Whitespace` tokenizer combined with `Stemmer` and `Stopwords`
+    filters. Supported languages include English, French, German, Spanish, Portuguese,
+    Italian, Dutch, Russian, and more — see the full list above.
+  </Tab>
+  <Tab title="CJK (Chinese, Japanese, Korean)">
+    Use the `Cangjie` tokenizer, which integrates Jieba for Chinese word segmentation.
+    The `"search"` mode is optimised for query-time tokenisation; `"default"` is
+    recommended for indexing.
+
+    ```datalog
+    ::fts create article:content_fts {
+        extractor: content,
+        tokenizer: Cangjie('search', false),
+        filters: []
+    }
+    ```
+  </Tab>
+</Tabs>
+
+---
+
+## JSON value support
+
+FTS and LSH extractors accept JSON column values as of v0.7. If the extractor column
+contains a JSON string value, that string is used directly. This allows you to index
+text that is stored inside a JSON document alongside structured fields in the same row.
+
+<Warning>
+  Versions before 1.0 do not guarantee syntax or API stability. Index definitions may
+  need to be recreated after an upgrade.
+</Warning>

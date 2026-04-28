@@ -1,0 +1,133 @@
+---
+title: "Running CozoDB as a standalone HTTP server"
+description: "Download the CozoDB standalone binary, start an in-memory or RocksDB server, use the REPL, and configure auth tokens for non-loopback network deployments."
+---
+
+CozoDB ships as a single standalone binary that exposes a full HTTP API, making it straightforward to run a database server without installing any additional runtime or dependencies. You can choose between an in-memory engine for ephemeral workloads or a persistent RocksDB backend for durable storage.
+
+## Download
+
+Download the latest release binary from the [CozoDB GitHub releases page](https://github.com/cozodb/cozo/releases).
+
+<CardGroup cols={2}>
+  <Card title="cozo-*" icon="microchip">
+    Standard builds with common storage backends. Recommended for most use cases.
+  </Card>
+  <Card title="cozo_all-*" icon="database">
+    Extended builds that include additional backends such as [TiKV](https://tikv.org/). Larger download size.
+  </Card>
+</CardGroup>
+
+## Starting the server
+
+<Steps>
+  <Step title="Start an in-memory server">
+    Run the following command to start a non-persistent, in-memory database server:
+
+    ```bash
+    ./cozo server
+    ```
+
+    The server binds to `http://127.0.0.1:9070` by default.
+  </Step>
+  <Step title="Start a persistent server with RocksDB">
+    Pass the `-e rocksdb` engine flag and a `-d` path to persist data to disk:
+
+    ```bash
+    ./cozo server -e rocksdb -d /path/to/mydb
+    ```
+  </Step>
+  <Step title="Explore all options">
+    Run the help flag to see all available configuration options, including binding address, port, and extra engine config:
+
+    ```bash
+    ./cozo server -h
+    ```
+  </Step>
+</Steps>
+
+### Server flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-e`, `--engine` | `mem` | Storage engine: `mem`, `sqlite`, `rocksdb`, and others. |
+| `-d`, `--path` | `cozo.db` | Path to the database directory. |
+| `-b`, `--bind` | `127.0.0.1` | Address to bind the server to. |
+| `-P`, `--port` | `9070` | Port to listen on. |
+| `-c`, `--config` | `{}` | Extra engine configuration as a JSON string. |
+| `--restore` | — | Restore from a backup file before starting. |
+
+## Stopping the server
+
+Press `Ctrl+C` in the terminal, or send `SIGTERM` to the process:
+
+```bash
+kill <PID>
+```
+
+## The REPL
+
+Run `./cozo repl` to open an interactive terminal session against the database. The same engine flags apply when starting the REPL.
+
+```bash
+./cozo repl -e rocksdb -d /path/to/mydb
+```
+
+### REPL meta commands
+
+<AccordionGroup>
+  <Accordion title="Parameters">
+    | Command | Description |
+    |---------|-------------|
+    | `%set KEY VALUE` | Set a named parameter usable in queries as `$KEY`. |
+    | `%unset KEY` | Remove a named parameter. |
+    | `%clear` | Remove all named parameters. |
+    | `%params` | Print all currently set parameters. |
+  </Accordion>
+  <Accordion title="Scripts and files">
+    | Command | Description |
+    |---------|-------------|
+    | `%run FILE` | Execute the CozoScript contained in `FILE`. |
+    | `%import FILE_OR_URL` | Import data in JSON format from a local file or URL. |
+    | `%save FILE` | Save the result of the next successful query to `FILE` as JSON instead of printing it. Omit `FILE` to cancel a previous `%save`. |
+  </Accordion>
+  <Accordion title="Backup and restore">
+    | Command | Description |
+    |---------|-------------|
+    | `%backup FILE` | Back up the current database to `FILE`. |
+    | `%restore FILE` | Restore data from a backup into the current (empty) database. |
+  </Accordion>
+</AccordionGroup>
+
+## Authentication
+
+When the server binds to `127.0.0.1` (the default), no authentication is required. When you bind to any other address, CozoDB automatically generates a 64-character alphanumeric token and writes it to a file named `<path>.<engine>.cozo_auth` alongside your database. The server prints the token file path to the log on startup.
+
+Pass the token with every request using one of these methods:
+
+<Tabs>
+  <Tab title="HTTP header">
+    ```bash
+    curl -H "x-cozo-auth: <TOKEN>" http://<host>:9070/text-query ...
+    ```
+  </Tab>
+  <Tab title="Query parameter">
+    ```bash
+    curl "http://<host>:9070/text-query?auth=<TOKEN>" ...
+    ```
+  </Tab>
+</Tabs>
+
+<Warning>
+  The built-in token mechanism is a last line of defence against accidental exposure only. It is not sufficient security for production deployments. Always place CozoDB behind a firewall, TLS-terminating reverse proxy, or equivalent when binding to non-loopback addresses.
+</Warning>
+
+## Building from source
+
+You need a [Rust toolchain](https://rustup.rs) installed. Run the following command from the repository root to build the standalone binary with RocksDB support:
+
+```bash
+cargo build --release -p cozo-bin -F compact -F storage-rocksdb
+```
+
+The compiled binary will be at `target/release/cozo`.

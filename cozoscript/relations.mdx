@@ -1,0 +1,161 @@
+---
+title: 'Stored relations: defining and managing tables in CozoDB'
+description: 'Create, inspect, and remove CozoDB relations with schema types, key/value columns, access levels, and system commands for schema management.'
+keywords: ['cozoscript', 'relations', 'schema', 'create', 'types', 'cozodb']
+---
+
+A stored relation in CozoDB is a persistent, schema-enforced table identified by name. Unlike SQL tables, every relation has an explicit separation between **key columns** (the primary key) and **value columns** (the payload). Rows with the same key are unique; inserting a row with a duplicate key overwrites the existing row. This design makes upsert semantics the default and simplifies concurrent writes.
+
+## Creating a relation
+
+Use `:create` to define a new relation. The schema uses `{key_cols => value_cols}`:
+
+```
+:create user {id: Int => name: String, email: String}
+```
+
+- Everything to the **left** of `=>` is part of the primary key.
+- Everything to the **right** of `=>` is a value column.
+- If there are no value columns, omit the `=>` entirely.
+
+A relation with only key columns:
+
+```
+:create tag {name: String}
+```
+
+## Column types
+
+| Type | Description |
+|---|---|
+| `Any` | Any value, no type enforcement (default when type is omitted) |
+| `Int` | 64-bit signed integer |
+| `Float` | 64-bit floating-point number |
+| `String` | UTF-8 string |
+| `Bool` | Boolean (`true` / `false`) |
+| `Bytes` | Raw byte array |
+| `Uuid` | UUID value |
+| `Json` | Arbitrary JSON value |
+| `Validity` | A validity timestamp for time-travel queries |
+| `[T]` | List of values of type `T` |
+| `[T; N]` | Fixed-length list of type `T` with length `N` |
+| `<F32; N>` / `<F64; N>` | Fixed-length vector for HNSW indexing |
+
+Append `?` to any type to allow `null` values:
+
+```
+:create profile {user_id: Int => bio: String?, avatar_url: String?}
+```
+
+## Default values
+
+Columns can have default values using the `default` keyword:
+
+```
+:create post {id: Int => title: String, views: Int default 0}
+```
+
+## `:create` vs `:replace`
+
+| Command | Behaviour |
+|---|---|
+| `:create relation_name { … }` | Creates a new relation; fails if it already exists |
+| `:replace relation_name { … }` | Creates the relation, **dropping** any existing one with the same name first |
+
+Use `:replace` when you need to reset a relation's schema or clear its data:
+
+```
+:replace user {id: Int => name: String, email: String}
+```
+
+## Removing a relation
+
+```
+?[] <- []
+:rm user {}
+```
+
+Or use the system command to drop a relation entirely:
+
+```
+::remove user
+```
+
+Multiple relations can be dropped together:
+
+```
+::remove user, post, tag
+```
+
+## Reading from stored relations
+
+Reference a relation in a query body using `*`:
+
+```
+?[name, email] := *user{name, email}
+```
+
+Filter by key:
+
+```
+?[name] := *user{id: $target_id, name}
+```
+
+## Inspecting schemas
+
+List all stored relations in the database:
+
+```
+::relations
+```
+
+Inspect the columns of a specific relation:
+
+```
+::columns user
+```
+
+This returns each column's name, type, whether it is part of the key, and any default value.
+
+## Access levels
+
+CozoDB lets you restrict what operations are allowed on a relation. Access levels are set with:
+
+```
+::access_level <level> relation_name
+```
+
+| Level | Read | Write | Drop |
+|---|---|---|---|
+| `normal` | Yes | Yes | Yes |
+| `protected` | Yes | Yes | No |
+| `read_only` | Yes | No | No |
+| `hidden` | No | No | No |
+
+<Warning>
+A relation with access level `hidden` cannot be read or written by any query. This is primarily used to protect internal system relations. Setting a user-defined relation to `hidden` will make it inaccessible until you change the level back using a privileged operation.
+</Warning>
+
+## Renaming relations
+
+```
+::rename old_name -> new_name
+```
+
+## Complete example
+
+Create a relation, insert a row, and query it:
+
+```
+:create product {sku: String => name: String, price: Float, in_stock: Bool default true}
+```
+
+```
+?[sku, name, price] <- [['ABC-1', 'Widget', 9.99]]
+:put product {sku => name, price}
+```
+
+```
+?[sku, name, price] := *product{sku, name, price}, in_stock = true
+:order price
+```

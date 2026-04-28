@@ -1,0 +1,168 @@
+---
+title: "Using CozoDB from Python with pycozo"
+description: "Install pycozo to embed CozoDB in Python or connect to a running server, run CozoScript queries, use pandas integration, and manage transactions."
+---
+
+`pycozo` is the official Python client for CozoDB. It works in two modes: **embedded**, where the database runs inside your Python process using the `cozo_embedded` native extension, and **client**, where it connects over HTTP to a standalone CozoDB server. Both modes expose the same `Client` API.
+
+## Installation
+
+<Steps>
+  <Step title="Install pycozo">
+    For embedded use (the most common case), install the `embedded` extra, which pulls in the `cozo_embedded` native library:
+
+    ```bash
+    pip install "pycozo[embedded]"
+    ```
+
+    For client-only use (connecting to a running `cozo` HTTP server with no local database):
+
+    ```bash
+    pip install pycozo
+    ```
+  </Step>
+  <Step title="Verify">
+    ```python
+    import pycozo
+    print(pycozo.__version__)
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The low-level `cozo_embedded` package on PyPI provides the native bindings. You are not meant to import it directly — always use `pycozo.client.Client`.
+</Note>
+
+## Creating a Client
+
+```python
+from pycozo.client import Client
+
+# Embedded — in-memory (no persistence)
+db = Client()
+
+# Embedded — SQLite on disk
+db = Client('sqlite', '/path/to/data.db', {})
+
+# Embedded — RocksDB on disk
+db = Client('rocksdb', '/path/to/data/', {})
+
+# Connect to a running CozoDB HTTP server
+db = Client(datatype='http', host='http://127.0.0.1:9070', auth='your-auth-token')
+```
+
+The constructor signature is:
+
+```python
+Client(
+    engine: str = 'mem',          # 'mem' | 'sqlite' | 'rocksdb'
+    path: str = '',               # path for persistent engines
+    options: dict = {},           # engine-specific options
+    *,
+    datatype: str = 'embedded',   # or 'http' for server mode
+    host: str = '',               # server base URL
+    auth: str = '',               # auth token for server mode
+)
+```
+
+## Running Queries
+
+### Basic query
+
+```python
+result = db.run("?[a] := a in [1, 2, 3]")
+print(result)
+# {'headers': ['a'], 'rows': [[1], [2], [3]]}
+```
+
+### Query with parameters
+
+Pass a dict of parameter names to values as the second argument:
+
+```python
+result = db.run(
+    "?[name, age] := name = $name, age = $age",
+    {'name': 'Alice', 'age': 30}
+)
+```
+
+### Result structure
+
+The return value is a dict with two keys:
+
+| Key | Type | Description |
+|---|---|---|
+| `headers` | `list[str]` | Column names in the order they appear |
+| `rows` | `list[list]` | Each inner list is one result row |
+
+## Pandas Integration
+
+Convert results to a DataFrame directly:
+
+```python
+import pandas as pd
+from pycozo.client import Client
+
+db = Client()
+result = db.run("?[a, b] <- [[1, 'x'], [2, 'y'], [3, 'z']]")
+
+df = pd.DataFrame(result['rows'], columns=result['headers'])
+print(df)
+#    a  b
+# 0  1  x
+# 1  2  y
+# 2  3  z
+```
+
+## Multi-statement Transactions
+
+Use `db.multi_transaction()` for a context-managed write transaction. All scripts in the block share the same snapshot.
+
+```python
+with db.multi_transaction() as tx:
+    tx.run(':create account {id: Int => balance: Float}')
+    tx.run('?[id, balance] <- [[1, 100.0]] :put account {id => balance}')
+    tx.run('?[id, balance] <- [[2, 250.0]] :put account {id => balance}')
+# commits on clean exit; rolls back on exception
+```
+
+You can also use the transaction object directly:
+
+```python
+tx = db.multi_transaction()
+try:
+    tx.run(':create log {ts: Validity => msg: String}')
+    tx.run("?[ts, msg] <- [[now(), 'hello']] :put log {ts => msg}")
+    tx.commit()
+except Exception:
+    tx.abort()
+    raise
+```
+
+## Export and Import Relations
+
+```python
+# Export — returns a dict keyed by relation name
+data = db.export_relations(['account', 'log'])
+
+# Import into another (or the same) database
+# Relations must already exist
+db2 = Client('sqlite', '/path/to/other.db', {})
+db2.import_relations(data)
+```
+
+<Warning>
+  Triggers are **not** fired during `import_relations`. If you need triggers to run, insert the data using a parameterized query instead.
+</Warning>
+
+## Backup and Restore
+
+Backups use the portable SQLite file format and can be restored into any storage backend:
+
+```python
+db.backup('/path/to/backup.db')
+
+# Restore into a fresh, empty database
+fresh = Client('rocksdb', '/path/to/new/', {})
+fresh.restore('/path/to/backup.db')
+```

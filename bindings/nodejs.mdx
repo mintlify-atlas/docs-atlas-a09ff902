@@ -1,0 +1,190 @@
+---
+title: "Using CozoDB from Node.js with cozo-node"
+description: "Install cozo-node, create a CozoDb instance, run async CozoScript queries, use multi-statement transactions, register mutation callbacks, and add custom rules."
+---
+
+`cozo-node` is the official Node.js binding for CozoDB. It ships prebuilt native binaries for Linux (x86\_64, ARM64), macOS (ARM64, x86\_64), and Windows (x86\_64), so no Rust toolchain is needed for typical usage. The API is fully async — every database operation returns a `Promise`.
+
+## Installation
+
+```bash
+npm install cozo-node
+```
+
+If no prebuilt binary is available for your platform, see the [building from source](#building-from-source) section below.
+
+## Quick Start
+
+```javascript
+const { CozoDb } = require('cozo-node')
+
+const db = new CozoDb()
+
+function printQuery(query, params = {}) {
+    return db.run(query, params)
+        .then(data => console.log(data))
+        .catch(err => console.error(err.display || err.message))
+}
+
+printQuery("?[] <- [['hello', 'world!']]")
+printQuery("?[] <- [['hello', 'world', $name]]", { name: 'JavaScript' })
+printQuery("?[a, b] <- [[1, 2]]")
+```
+
+<Warning>
+  Always call `db.close()` when you are done with a database. Simply letting the variable go out of scope is not sufficient — the underlying native resources will not be freed automatically.
+</Warning>
+
+## Constructor
+
+```typescript
+new CozoDb(engine?: string, path?: string, options?: object): CozoDb
+```
+
+| Parameter | Default | Description |
+|---|---|---|
+| `engine` | `'mem'` | Storage engine: `'mem'`, `'sqlite'`, or `'rocksdb'` |
+| `path` | `'data.db'` | On-disk path; ignored for `'mem'` |
+| `options` | `{}` | Engine options; unused in published binaries |
+
+```javascript
+// In-memory (default)
+const memDb = new CozoDb()
+
+// SQLite on disk
+const sqliteDb = new CozoDb('sqlite', '/path/to/data.db')
+
+// RocksDB on disk
+const rocksDb = new CozoDb('rocksdb', '/path/to/data/')
+```
+
+## Core Async Methods
+
+<CodeGroup>
+
+```javascript run
+// Returns { headers: string[], rows: any[][] }
+const result = await db.run("?[a] := a in [1, 2, 3]")
+console.log(result.rows) // [[1], [2], [3]]
+
+// With parameters
+const r2 = await db.run(
+    "?[name] := name = $name",
+    { name: 'Alice' }
+)
+```
+
+```javascript exportRelations / importRelations
+// Export
+const data = await db.exportRelations(['my_relation'])
+
+// Import (relation must already exist in the target database)
+// Triggers are NOT fired during import
+await db.importRelations(data)
+```
+
+```javascript backup / restore
+// Backup — uses portable SQLite file format
+await db.backup('/path/to/backup.db')
+
+// Restore into a fresh, empty database
+const fresh = new CozoDb('rocksdb', '/path/to/new/')
+await fresh.restore('/path/to/backup.db')
+fresh.close()
+```
+
+```javascript importRelationsFromBackup
+// Selectively import specific relations from a backup file
+await db.importRelationsFromBackup('/path/to/backup.db', ['users', 'orders'])
+```
+
+</CodeGroup>
+
+## TypeScript Support
+
+Type declarations are provided in `index.d.ts`:
+
+```typescript
+import { CozoDb } from 'cozo-node'
+
+const db = new CozoDb()
+const result: Promise<any> = db.run("?[a] := a in [1, 2, 3]")
+```
+
+## Multi-statement Transactions
+
+Use `db.multiTransact(write)` to open a transaction handle. All scripts share the same atomic snapshot.
+
+```javascript
+const { CozoDb } = require('cozo-node')
+
+const db = new CozoDb()
+
+const tx = db.multiTransact(true) // true = write transaction
+
+await tx.run(':create account {id: Int => balance: Float}')
+await tx.run('?[id, balance] <- [[1, 100.0]] :put account {id => balance}')
+await tx.run('?[id, balance] <- [[2, 250.0]] :put account {id => balance}')
+tx.commit() // or tx.abort() to roll back
+
+const result = await db.run('?[id, balance] := *account{id, balance}')
+console.log(result)
+
+db.close()
+```
+
+## Mutation Callbacks
+
+Register a callback to be invoked whenever rows in a relation change:
+
+```javascript
+const { CozoDb } = require('cozo-node')
+const db = new CozoDb()
+
+const cbId = db.registerCallback('test', (op, newRows, oldRows) => {
+    console.log(`${op}`, JSON.stringify(newRows), JSON.stringify(oldRows))
+})
+
+await db.run('?[a] <- [[1],[2],[3]] :create test {a}')
+
+// Later, unregister when no longer needed
+db.unregisterCallback(cbId)
+db.close()
+```
+
+## Custom Fixed Rules
+
+Implement your own built-in rule as an async function and register it with `db.registerNamedRule`:
+
+```javascript
+const { CozoDb } = require('cozo-node')
+const db = new CozoDb()
+
+db.registerNamedRule('Multiply', 1, async (inputs, options) => {
+    // inputs[0] is an array of rows from the first input relation
+    return inputs[0].map(row => [row[0] * options.mul])
+})
+
+const result = await db.run(`
+    rel[] <- [[1],[2],[3]]
+    ?[a] <~ Multiply(rel[], mul: 10)
+`)
+console.log(result.rows) // [[10], [20], [30]]
+
+db.unregisterNamedRule('Multiply')
+db.close()
+```
+
+## Building from Source
+
+Building requires a [Rust toolchain](https://rustup.rs). Run the following from the repository root:
+
+```bash
+cargo build --release -p cozo-node -F compact -F storage-rocksdb
+```
+
+Find the compiled dynamic library under `../target/release/` (`.so` on Linux, `.dylib` on macOS, `.dll` on Windows) and copy it to `native/6/cozo_node_prebuilt.node` inside the `cozo-lib-nodejs` directory, creating intermediate directories as needed. Then verify with:
+
+```bash
+node example.js
+```

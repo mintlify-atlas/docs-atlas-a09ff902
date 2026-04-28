@@ -1,0 +1,299 @@
+---
+title: "Graph algorithms in CozoDB"
+description: "CozoDB provides 19 built-in graph algorithms — PageRank, Dijkstra, BFS, community detection — as fixed rules callable directly from CozoScript queries."
+keywords: ["graph algorithms", "fixed rules", "CozoScript", "PageRank", "Dijkstra", "community detection"]
+---
+
+CozoDB treats graph algorithms as first-class citizens of the query language. Rather than
+calling an external library or switching to a procedural API, you invoke them as **fixed rules**
+inside ordinary Datalog queries using the `<~` operator. The result is a relation you can
+join, filter, and aggregate just like any other relation in the same query.
+
+## Fixed-rule syntax
+
+Every graph algorithm follows the same calling convention:
+
+```datalog
+?[output_col, ...] <~ AlgorithmName(input_relation[], options_relation[], ...)
+```
+
+The asterisk prefix (`*`) dereferences a stored relation; bare names with `[]` are
+inline relations defined earlier in the same query. Options are passed either as
+additional input relations or as named keyword arguments.
+
+---
+
+## Shortest path
+
+### ShortestPathDijkstra
+
+Finds the shortest weighted path between one or more source nodes and a set of target
+nodes using Dijkstra's algorithm. The output arity is 4: `(src, dst, distance, path)`.
+
+```datalog
+start[] <- [['FRA']]
+end[]   <- [['YPO']]
+
+?[src, dst, distance, path] <~ ShortestPathDijkstra(*route[], start[], end[])
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `undirected` | bool | `false` | Treat edges as undirected |
+| `keep_ties` | bool | `false` | Return all tied shortest paths |
+
+The edge relation must have at least two columns: `(from, to)`. A third numeric column is
+used as the edge weight when present.
+
+### ShortestPathBFS
+
+Unweighted shortest path via breadth-first search. Useful when all edges have equal cost.
+
+```datalog
+start[] <- [['FRA']]
+?[src, dst, distance, path] <~ ShortestPathBFS(*route[], start[])
+```
+
+### ShortestPathAStar
+
+Heuristic shortest path. Requires a third input relation supplying a heuristic value for
+each node (for example, a geographic distance to the goal).
+
+```datalog
+?[src, dst, distance, path] <~ ShortestPathAStar(*route[], start[], end[], *heuristic[])
+```
+
+### KShortestPathYen
+
+Returns the *k* shortest loopless paths using Yen's algorithm. Requires the `k` option.
+
+```datalog
+?[src, dst, cost, path] <~ KShortestPathYen(*route[], start[], end[], k: 5)
+```
+
+---
+
+## Centrality
+
+### PageRank
+
+Computes the PageRank score for every node. Output arity is 2: `(node, rank)`.
+
+```datalog
+?[name, rank] <~ PageRank(*edge[])
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `undirected` | bool | `false` | Symmetrise directed edges |
+| `theta` | float (0–1) | `0.85` | Damping factor |
+| `epsilon` | float (0–1) | `0.0001` | Convergence threshold |
+| `iterations` | int | `10` | Maximum power iterations |
+
+**Performance (RocksDB backend, 2020 Mac Mini):**
+
+- 10K nodes, 120K edges: ~50 ms
+- 100K nodes, 1.7M edges: ~1 second
+- 1.6M nodes, 32M edges: ~30 seconds
+
+### DegreeCentrality
+
+Returns in-degree, out-degree, and total degree for every node. Output arity is 4:
+`(node, total_degree, out_degree, in_degree)`.
+
+```datalog
+?[node, total, out_d, in_d] <~ DegreeCentrality(*edge[])
+```
+
+An optional second input relation restricts which nodes are counted. Nodes that appear
+only in the node relation (with no edges) are included with zero degrees.
+
+### BetweennessCentrality
+
+Counts how often each node lies on a shortest path between two other nodes.
+
+```datalog
+?[node, score] <~ BetweennessCentrality(*edge[])
+```
+
+### ClosenessCentrality
+
+Measures how close a node is to all other nodes in the graph.
+
+```datalog
+?[node, score] <~ ClosenessCentrality(*edge[])
+```
+
+---
+
+## Traversal
+
+### Bfs
+
+Breadth-first search from one or more starting nodes. Returns `(start, found, path)`.
+Use the `condition` option to stop as soon as a predicate is satisfied, and `limit`
+to cap the number of results.
+
+```datalog
+?[start, found, path] <~ Bfs(*edge[], *node[], start[],
+                              condition: name == 'target',
+                              limit: 1)
+```
+
+### Dfs
+
+Depth-first search. Same interface and output shape as `Bfs`.
+
+```datalog
+?[start, found, path] <~ Dfs(*edge[], *node[], start[],
+                              condition: active == true,
+                              limit: 5)
+```
+
+### RandomWalk
+
+Performs random walks of a fixed number of `steps` from each starting node.
+Returns `(walk_id, start_node, path_list)`.
+
+```datalog
+starts[] <- [['A'], ['B']]
+
+?[id, start, path] <~ RandomWalk(*edge[], *node[], starts[],
+                                  steps: 10,
+                                  iterations: 3)
+```
+
+An optional `weight` expression is evaluated per edge to produce a sampling probability.
+
+---
+
+## Community detection
+
+### CommunityDetectionLouvain
+
+Hierarchical community detection via the Louvain method. Output arity is 2:
+`(community_labels_list, node)`, where `community_labels_list` is a list of community
+identifiers ordered from the outermost hierarchy inward.
+
+```datalog
+?[community, node] <~ CommunityDetectionLouvain(*edge[])
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `undirected` | bool | `false` | Treat edges as undirected |
+| `max_iter` | int | `10` | Maximum iterations per level |
+| `delta` | float (0–1) | `0.0001` | Minimum modularity improvement to continue |
+| `keep_depth` | int | — | Truncate the hierarchy list to this depth |
+
+### LabelPropagation
+
+Semi-supervised or unsupervised community detection by propagating labels along edges.
+
+```datalog
+?[node, community] <~ LabelPropagation(*edge[])
+```
+
+---
+
+## Spanning trees
+
+<AccordionGroup>
+  <Accordion title="MinimumSpanningForestKruskal">
+    Kruskal's algorithm for minimum spanning forest. Handles disconnected graphs.
+
+    ```datalog
+    ?[src, dst, weight] <~ MinimumSpanningForestKruskal(*edge[])
+    ```
+  </Accordion>
+  <Accordion title="MinimumSpanningTreePrim">
+    Prim's algorithm for minimum spanning tree starting from a specified root.
+
+    ```datalog
+    root[] <- [['A']]
+    ?[src, dst, weight] <~ MinimumSpanningTreePrim(*edge[], root[])
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Structural analysis
+
+<AccordionGroup>
+  <Accordion title="ClusteringCoefficients">
+    Computes local clustering coefficient, triangle count, and degree for every node.
+    Output arity is 4: `(node, clustering_coefficient, n_triangles, degree)`.
+
+    ```datalog
+    ?[node, coeff, triangles, degree] <~ ClusteringCoefficients(*edge[])
+    ```
+
+    The algorithm always treats edges as undirected.
+  </Accordion>
+
+  <Accordion title="StronglyConnectedComponent">
+    Labels each node with its strongly connected component identifier.
+
+    ```datalog
+    ?[node, component_id] <~ StronglyConnectedComponent(*edge[])
+    ```
+  </Accordion>
+
+  <Accordion title="TopSort">
+    Topological sort of a directed acyclic graph.
+
+    ```datalog
+    ?[node, order] <~ TopSort(*edge[])
+    ```
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Input format
+
+All algorithms accept an edge relation as their first input. The minimum schema is:
+
+```
+(from, to)
+```
+
+For weighted algorithms, add a numeric third column:
+
+```
+(from, to, weight)
+```
+
+Pass `undirected: true` to treat a directed edge relation as undirected (the engine
+adds the reverse edge internally without modifying your stored data).
+
+<Note>
+  Inline relations (defined with `<-`) are composable with all fixed rules. You can
+  filter, transform, or join stored relations before passing them as graph inputs.
+</Note>
+
+---
+
+## Complete algorithm reference
+
+| Fixed rule | Output arity | Notes |
+|---|---|---|
+| `ShortestPathDijkstra` | 4 | Weighted; parallel multi-source |
+| `ShortestPathBFS` | 4 | Unweighted |
+| `ShortestPathAStar` | 4 | Requires heuristic relation |
+| `KShortestPathYen` | 4 | Requires `k` option |
+| `BetweennessCentrality` | 2 | All-pairs shortest paths |
+| `ClosenessCentrality` | 2 | All-pairs shortest paths |
+| `DegreeCentrality` | 4 | `(node, total, out, in)` |
+| `PageRank` | 2 | Power iteration |
+| `ClusteringCoefficients` | 4 | Always undirected |
+| `StronglyConnectedComponent` | 2 | Tarjan / Kosaraju |
+| `TopSort` | 2 | DAG only |
+| `MinimumSpanningForestKruskal` | 3 | Handles disconnected graphs |
+| `MinimumSpanningTreePrim` | 3 | Requires root relation |
+| `CommunityDetectionLouvain` | 2 | Hierarchical |
+| `LabelPropagation` | 2 | |
+| `Bfs` | 3 | `(start, found, path)` |
+| `Dfs` | 3 | `(start, found, path)` |
+| `RandomWalk` | 3 | `(walk_id, start, path)` |

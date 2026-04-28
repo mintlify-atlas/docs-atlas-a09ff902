@@ -1,0 +1,198 @@
+---
+title: 'Inserting, updating, and deleting data in CozoDB'
+description: 'Use :put, :rm, :update, :ensure, and :ensure_not in CozoScript to insert, delete, and assert rows. Covers triggers, :returning, and transaction patterns.'
+keywords: ['cozoscript', 'mutations', 'put', 'rm', 'insert', 'update', 'delete', 'cozodb']
+---
+
+CozoDB mutations are expressed as query scripts with a mutation directive appended. The `?` rule produces the rows to act on, and the directive specifies what to do with them. This unified approach means you can derive the rows to insert or delete from any query—including joins, aggregations, and recursive rules.
+
+## Inserting or updating rows (`:put`)
+
+`:put` is an **upsert**: if a row with the matching key already exists it is overwritten, otherwise a new row is inserted.
+
+```
+?[id, name, email] <- [[1, 'Alice', 'alice@example.com']]
+:put user {id => name, email}
+```
+
+The schema after `:put` mirrors the relation definition: key columns are listed before `=>` and value columns after.
+
+Insert multiple rows at once:
+
+```
+?[id, name, email] <- [
+  [1, 'Alice', 'alice@example.com'],
+  [2, 'Bob',   'bob@example.com']
+]
+:put user {id => name, email}
+```
+
+Derive rows from an existing relation:
+
+```
+?[id, name, new_email] := *user{id, name},
+                           id = 1,
+                           new_email = 'updated@example.com'
+:put user {id => name, email: new_email}
+```
+
+## Deleting rows (`:rm`)
+
+`:rm` removes rows by primary key. Only key columns need to be provided:
+
+```
+?[id] <- [[1]]
+:rm user {id}
+```
+
+Delete rows matching a condition:
+
+```
+?[id] := *user{id, name}, name = 'Alice'
+:rm user {id}
+```
+
+## Partial update (`:update`)
+
+`:update` modifies only the value columns you specify, leaving others unchanged. If the row does not exist, the operation silently does nothing:
+
+```
+?[id, email] <- [[1, 'newemail@example.com']]
+:update user {id => email}
+```
+
+## Strict insert (`:insert`)
+
+`:insert` behaves like `:put` but **fails** if a row with the same key already exists. Use this when you need to guarantee no silent overwrites:
+
+```
+?[id, name, email] <- [[3, 'Carol', 'carol@example.com']]
+:insert user {id => name, email}
+```
+
+## Existence assertions
+
+These operations let you verify preconditions atomically within a query.
+
+**`:ensure`** — fails with an error if any of the specified rows are **not** present in the relation:
+
+```
+?[id] <- [[1]]
+:ensure user {id}
+```
+
+**`:ensure_not`** — fails with an error if any of the specified rows **are** present in the relation:
+
+```
+?[id] <- [[99]]
+:ensure_not user {id}
+```
+
+Both are useful for enforcing invariants in multi-step workflows: you can assert that a foreign key exists before inserting a dependent row, or that a username is not taken before creating an account.
+
+## `:returning` — get back what was written
+
+Append `:returning` to receive the actual rows that were written as the query result:
+
+```
+?[id, name, email] <- [[4, 'Dave', 'dave@example.com']]
+:put user {id => name, email}
+:returning
+```
+
+The result set contains the rows that were inserted or updated. This is useful when you need confirmation of what was written, or when default values computed by the engine need to be observed.
+
+## Assertions on result sets
+
+You can assert properties of the query result set using `:assert`:
+
+```
+?[id] := *user{id, name: 'Alice'}
+:assert some
+```
+
+`:assert some` fails if the result is empty—useful as a "row must exist" check. `:assert none` fails if the result is non-empty—useful as a "row must not exist" check.
+
+These can be combined with mutations in imperative scripts.
+
+## Triggers
+
+CozoDB supports **triggers** that run a query script automatically when rows are inserted (`put`) or removed (`rm`) from a relation. Triggers are set with the `::set_triggers` system command:
+
+```
+::set_triggers audit_log
+  on put {
+    ?[id, name, ts] := _new[id, name], ts = now()
+    :put audit_log {id => name, ts}
+  }
+  on rm {
+    ?[id, ts] := _old[id], ts = now()
+    :put audit_log_deleted {id => ts}
+  }
+```
+
+Inside a trigger body:
+- `_new` contains the rows that were just written.
+- `_old` contains the rows that were just removed.
+
+<Warning>
+Triggers do **not** fire when data is imported via the bulk import API. If you need triggers to run on imported data, insert through the normal query path instead.
+</Warning>
+
+Inspect the triggers on a relation:
+
+```
+::show_triggers user
+```
+
+Remove all triggers:
+
+```
+::set_triggers user
+```
+
+(Omitting all `on` clauses clears existing triggers.)
+
+## Mutability in the client API
+
+When using CozoDB from Rust, the `run_script` and `run_script_read_only` methods enforce whether a script may perform mutations. Passing a mutable script to `run_script_read_only` returns an error. This separation prevents accidental writes in read-only contexts and makes the intent explicit in application code.
+
+In other client libraries (Python, Node.js, etc.) the same distinction is exposed through optional flags or separate method names—consult the relevant client documentation for details.
+
+## Imperative scripts for multi-step workflows
+
+For sequences of mutations that depend on each other, CozoScript supports **imperative scripts**. Each step is a query script enclosed in `{ }`, and results can be bound to named variables with `as`:
+
+```
+{ ?[id] := *user{id}, id > 100
+  :rm user {id} }
+
+{ ?[] <- [[]]
+  :put audit {event: 'bulk_delete', ts: now()} }
+```
+
+Control flow constructs (`%if`, `%loop`, `%return`, `%break`) are available for complex workflows. See the CozoDB documentation for imperative script syntax.
+
+## Complete workflow example
+
+Create the relation, insert a row, verify it exists, and update it:
+
+```
+:create user {id: Int => name: String, email: String}
+```
+
+```
+?[id, name, email] <- [[1, 'Alice', 'alice@example.com']]
+:put user {id => name, email}
+```
+
+```
+?[id] <- [[1]]
+:ensure user {id}
+```
+
+```
+?[id, name, email] := *user{id: 1, name}, email = 'alice@new.com'
+:put user {id => name, email}
+:returning
+```

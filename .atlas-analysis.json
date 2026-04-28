@@ -1,23 +1,11 @@
 {
-  "$schema": "https://mintlify.com/docs.json",
-  "name": "CozoDB",
+  "projectType": "data-platform",
+  "projectName": "CozoDB",
+  "projectDescription": "A transactional, relational-graph-vector database that uses Datalog (CozoScript) for querying, supporting embedded and client-server deployment across many languages and platforms.",
   "theme": "aspen",
-  "colors": {
-    "primary": "#2563EB",
-    "light": "#EFF6FF",
-    "dark": "#1E3A8A"
-  },
-  "navbar": {
-    "primary": {
-      "type": "github",
-      "href": "https://github.com/cozodb/cozo"
-    }
-  },
-  "footer": {
-    "socials": {
-      "github": "https://github.com/cozodb/cozo"
-    }
-  },
+  "primaryColor": "#2563EB",
+  "lightColor": "#EFF6FF",
+  "darkColor": "#1E3A8A",
   "navigation": {
     "tabs": [
       {
@@ -86,5 +74,35 @@
         ]
       }
     ]
-  }
+  },
+  "keyFeatures": [
+    "Datalog-based query language (CozoScript) with recursive queries",
+    "Embeddable and client-server deployment modes",
+    "First-class graph data and algorithms (PageRank, Dijkstra, BFS, community detection, and more)",
+    "HNSW vector search integrated natively into Datalog queries",
+    "Full-text search with MinHash-LSH near-duplicate detection",
+    "Time travel: historical queries on immutable data",
+    "Multiple storage backends: in-memory, SQLite, RocksDB, Sled, TiKV",
+    "MVCC transactions for safe concurrent writes",
+    "Multi-language bindings: Rust, Python, Node.js, Java, Clojure, Swift, Go, C/C++, WASM"
+  ],
+  "publicApiSurface": [
+    "DbInstance::new(engine, path, options)",
+    "Db::run_script(script, params, mutability)",
+    "Db::export_relations(relations)",
+    "Db::import_relations(data)",
+    "Db::backup_db(path)",
+    "Db::restore_backup(path)",
+    "Db::multi_transaction(write)",
+    "Db::register_fixed_rule(name, rule)",
+    "Db::register_callback(relation, callback)",
+    "POST /text-query HTTP endpoint",
+    "GET /export/{relations} HTTP endpoint",
+    "PUT /import HTTP endpoint",
+    "POST /backup HTTP endpoint",
+    "POST /import-from-backup HTTP endpoint",
+    "CozoDb (Node.js class)",
+    "CozoDB (Python class via pycozo)",
+    "cozo_open_db / cozo_run_query / cozo_close_db (C API)"
+  ]
 }

@@ -1,0 +1,168 @@
+---
+title: "Using CozoDB from Swift on iOS and macOS"
+description: "Integrate CozoDB into iOS and macOS apps via CocoaPods or Swift Package Manager using CozoSwiftBridge, with in-memory and SQLite storage backends."
+---
+
+`CozoSwiftBridge` brings CozoDB to Apple platforms as an embeddable database. It supports iOS (ARM64, including simulators) and macOS (both Apple Silicon and Intel). Because mobile and desktop environments have different storage constraints, the prebuilt binaries include the in-memory (`mem`) and SQLite (`sqlite`) backends only — RocksDB can be enabled by [building from source](#building-from-source).
+
+## Installation
+
+### CocoaPods
+
+Add `CozoSwiftBridge` to your `Podfile`:
+
+```ruby Podfile
+target 'YourApp' do
+  use_frameworks!
+
+  pod 'CozoSwiftBridge', '~> 0.7.1'
+end
+```
+
+Then run:
+
+```bash
+pod install
+```
+
+### Swift Package Manager (SPM)
+
+<Steps>
+  <Step title="Download the package archive">
+    Go to the [CozoDB releases page](https://github.com/cozodb/cozo/releases) and download `CozoSwiftBridge.tgz`. Decompress it locally.
+  </Step>
+  <Step title="Add to your Xcode project">
+    In Xcode, choose **File > Add Packages**, click **Add Local...** at the bottom, select the decompressed folder (the one with `Package.swift` at its root), then click **Add Package**.
+  </Step>
+  <Step title="Link the library">
+    Click your project in the left pane, go to **General > Frameworks, Libraries, and Embedded Content**, click the `+` button, and select **Workspace > CozoSwiftBridge > CozoSwiftBridge** (library icon).
+  </Step>
+</Steps>
+
+<Note>
+  The package cannot be fetched directly from the GitHub repository URL — binaries are distributed as a release archive to avoid checking large binary files into version control.
+</Note>
+
+## Platform and Storage Support
+
+| Platform | Architectures | Storage |
+|---|---|---|
+| iOS device | ARM64 | `mem`, `sqlite` |
+| iOS simulator | ARM64, x86\_64 | `mem`, `sqlite` |
+| macOS | ARM64, x86\_64 | `mem`, `sqlite` |
+
+Storage key: `M` = in-memory, `Q` = SQLite.
+
+## Basic Usage
+
+```swift
+import CozoSwiftBridge
+
+// In-memory database (not persistent)
+let memDb = CozoDB()
+
+// SQLite database stored in the app's home directory
+let path = NSHomeDirectory() + "/cozo-data.db"
+let db = try! CozoDB("sqlite", path)
+
+// Run a query — returns [NamedRow]
+let rows = try! db.run("?[] <- [[1, 2, 3]]")
+print(rows)
+```
+
+### API reference
+
+```swift
+public class CozoDB {
+
+    /// Creates an in-memory database.
+    public init()
+
+    /// Creates a database with the given engine and path.
+    ///
+    /// - Parameters:
+    ///   - kind: `"mem"` or `"sqlite"`.
+    ///   - path: Path to the SQLite file; ignored for `"mem"`.
+    public init(_ kind: String, _ path: String) throws
+
+    /// Run a CozoScript query.
+    public func run(_ query: String) throws -> [NamedRow]
+
+    /// Run a CozoScript query with parameters (as JSON).
+    public func run(_ query: String, params: JSON) throws -> [NamedRow]
+
+    /// Export relations to JSON.
+    public func exportRelations(relations: [String]) throws -> JSON
+
+    /// Import data into existing relations.
+    /// Note: triggers are NOT fired during import.
+    public func importRelations(data: JSON) throws
+
+    /// Backup the database to a file.
+    public func backup(path: String) throws
+
+    /// Restore from a backup file.
+    public func restore(path: String) throws
+
+    /// Import specific relations from a backup file.
+    /// Note: triggers are NOT fired during import.
+    public func importRelationsFromBackup(path: String, relations: [String]) throws
+}
+```
+
+## Running Queries with Parameters
+
+Parameters are passed as a `JSON` object:
+
+```swift
+import CozoSwiftBridge
+
+let db = CozoDB()
+
+// Create a relation
+try! db.run(":create user {name: String => age: Int}")
+
+// Insert with parameters
+let insertParams: JSON = ["name": "Alice", "age": 30]
+try! db.run(
+    "?[name, age] <- [[$name, $age]] :put user {name => age}",
+    params: insertParams
+)
+
+// Query with parameters
+let queryParams: JSON = ["name": "Alice"]
+let rows = try! db.run(
+    "?[name, age] := *user{name, age}, name = $name",
+    params: queryParams
+)
+print(rows)
+```
+
+## Export and Import
+
+```swift
+// Export
+let data = try! db.exportRelations(relations: ["user"])
+
+// Import into another database (relation must already exist)
+let db2 = try! CozoDB("sqlite", NSHomeDirectory() + "/cozo2.db")
+try! db2.importRelations(data: data)
+```
+
+## Building from Source
+
+To build with RocksDB support or to target additional platforms, you need the [Rust toolchain](https://rustup.rs) and then run the `build-rust.sh` script in the `cozo-lib-swift` directory:
+
+```bash
+# Set for faster (LTO-optimised) output
+export CARGO_PROFILE_RELEASE_LTO=fat
+./build-rust.sh
+```
+
+The compiled `CozoSwiftBridge` Swift package will appear in a directory of the same name.
+
+To add RocksDB support on macOS, edit the build script and change the `cargo build` lines to include `-F storage-rocksdb`. You must then also link `libc++.tbd` under **Build Phases > Link Binary With Libraries** in Xcode.
+
+<Warning>
+  Building RocksDB for mobile (iOS) targets is significantly more involved than for desktop. Unless you have a concrete need for RocksDB's higher concurrency, SQLite is the recommended persistent backend for mobile apps.
+</Warning>

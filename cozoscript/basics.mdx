@@ -1,0 +1,167 @@
+---
+title: 'CozoScript: Datalog query language for CozoDB'
+description: 'CozoScript is a Datalog dialect for CozoDB. Learn rule syntax, unification, inline relations, negation, and parameters—all without SQL.'
+keywords: ['cozoscript', 'datalog', 'rules', 'query', 'cozodb']
+---
+
+CozoScript is the native query language of CozoDB. Rather than the `SELECT … FROM … WHERE` structure of SQL, CozoScript uses **Datalog rules**: declarative, composable logic clauses that describe _what_ you want to compute, not _how_ to compute it. Rules can call each other, support recursion, and decompose naturally into reusable pieces—making complex graph and relational queries far more readable than equivalent SQL.
+
+## The fundamental query structure
+
+Every CozoScript query has at least one **head** rule whose name is `?`. The head describes the columns you want back:
+
+```
+?[col1, col2] := rule_body
+```
+
+The `?` on the left is the output relation. Symbols in `[...]` become the returned columns. The `:=` separates the head from the **body**, which is a comma-separated list of atoms that must all be satisfied simultaneously (logical AND).
+
+A minimal query that returns a constant:
+
+```
+?[greeting] := greeting = 'hello'
+```
+
+## Inline relations (constants)
+
+Use `<-` to define a rule directly from a list of constant tuples. This is how you introduce data without a stored relation:
+
+```
+?[] <- [['hello', 'world']]
+```
+
+With column bindings:
+
+```
+?[lang, msg] <- [['en', 'hello'], ['es', 'hola']]
+```
+
+## Reading from stored relations
+
+Stored relations are prefixed with `*`. You can access columns by **name** using `{}` syntax or **positionally** using `[]` syntax.
+
+Named (recommended for clarity):
+
+```
+?[name, email] := *user{name, email}
+```
+
+Named with a constant constraint on a key column:
+
+```
+?[name] := *user{id: 1, name}
+```
+
+Positional (columns are in schema-definition order):
+
+```
+?[id, name] := *user[id, name]
+```
+
+## Atoms and unification
+
+Within a rule body, you bind values to symbols. Binding can happen through:
+
+**Direct assignment:**
+
+```
+?[x] := x = 42
+```
+
+**Membership (`in`):**
+
+```
+?[x] := x in [1, 2, 3]
+```
+
+**Relations:** every field in a relation atom unifies with a symbol or value. Symbols that appear in multiple atoms must agree on their value (this is the join mechanism):
+
+```
+?[name, city] := *user{name, city_id},
+                 *city{id: city_id, name: city}
+```
+
+## Filtering with expressions
+
+Any Boolean expression in the body acts as a filter:
+
+```
+?[name] := *user{name}, name != 'Alice'
+```
+
+Compound conditions:
+
+```
+?[name, score] := *user{name, score}, score >= 80, score <= 100
+```
+
+## Multiple rules for the same head (union)
+
+You can write multiple rules with the same head name. The results are **unioned** (deduplicated):
+
+```
+?[name] := *employee{name}
+?[name] := *contractor{name}
+```
+
+This returns all names from both relations, with duplicates removed.
+
+## Negation
+
+Use `not` to exclude tuples that satisfy a sub-goal. The negated atom must only reference variables already bound in the rule:
+
+```
+?[name] := *user{name}, not *banned{name}
+```
+
+<Warning>
+Symbols that appear **only** inside a `not` clause are not considered bound. You cannot use an unbound symbol in the rule head.
+</Warning>
+
+## Parameters
+
+Parameters are placeholders prefixed with `$` that you pass in at query time. They let you write a query once and execute it with different inputs:
+
+```
+?[name, email] := *user{id: $target_id, name, email}
+```
+
+Parameters are provided as a JSON object when running the query via any CozoDB client API, e.g. `{"target_id": 42}`.
+
+## Query options
+
+After the rules, you can attach output options:
+
+| Option | Effect |
+|---|---|
+| `:limit N` | Return at most N rows |
+| `:offset N` | Skip the first N rows |
+| `:order col` / `:order -col` | Sort ascending / descending |
+| `:timeout N` | Abort if query exceeds N seconds |
+
+```
+?[name, score] := *user{name, score}
+:order -score
+:limit 10
+```
+
+## Complete example
+
+Using the classic airport routing dataset (`*route{fr, to}`):
+
+```
+?[count_unique(to)] := *route{fr: 'FRA', to}
+```
+
+Returns the number of airports directly reachable from Frankfurt (`FRA`).
+
+Two-hop reachability:
+
+```
+?[count_unique(to)] := *route{fr: 'FRA', to: stop},
+                       *route{fr: stop, to}
+```
+
+<Note>
+CozoScript variables are case-sensitive. By convention, variables start with a lowercase letter or underscore. A symbol that starts with an uppercase letter will trigger an `unbound_symb_in_head` error if it appears in the head but is not unified in the body.
+</Note>

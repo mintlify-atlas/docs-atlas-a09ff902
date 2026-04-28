@@ -1,0 +1,228 @@
+---
+title: "Using CozoDB from Rust with the cozo Crate"
+description: "Embed CozoDB directly in Rust applications using DbInstance, run_script, multi-statement transactions, callbacks, and custom fixed rules via the cozo crate."
+---
+
+The `cozo` crate is the core library that powers all CozoDB language bindings. Using it directly from Rust gives you the full, strongly-typed API — including native `DataValue` parameters, multi-statement transactions backed by crossbeam channels, mutation callbacks, and pluggable custom fixed rules — with no string-serialization overhead.
+
+## Adding the Dependency
+
+Add `cozo` to your `Cargo.toml`. Choose features to match the storage engines and capabilities you need:
+
+```toml Cargo.toml
+[dependencies]
+cozo = { version = "0.7.6", features = ["compact", "storage-rocksdb"] }
+```
+
+### Feature flags
+
+| Feature | Description |
+|---|---|
+| `compact` | Enables `minimal` + `requests` + `graph-algo` (recommended default) |
+| `compact-single-threaded` | Like `compact` but single-threaded; required for WASM builds |
+| `storage-sqlite` | SQLite persistent backend (bundled; also used for backup/restore) |
+| `storage-rocksdb` | RocksDB persistent backend — high concurrency, high performance |
+| `graph-algo` | Graph algorithms (PageRank, Dijkstra, HNSW, etc.) |
+| `requests` | Lets queries make outbound HTTP requests to fetch data |
+| `jemalloc` | Use jemalloc as the global allocator; can improve throughput |
+| `wasm` | WASM target polyfills; must be combined with `compact-single-threaded` |
+
+<Note>
+  The `storage-sqlite` feature also enables backup and restore. Without it, those operations are unavailable regardless of the backend you open.
+</Note>
+
+## Opening a Database
+
+`DbInstance` is the main entry point. It dispatches to the concrete storage implementation selected at construction time.
+
+```rust
+use cozo::*;
+
+// In-memory (no path required)
+let mem_db = DbInstance::new("mem", "", Default::default()).unwrap();
+
+// SQLite on disk (requires feature "storage-sqlite")
+let sqlite_db = DbInstance::new("sqlite", "/path/to/data.db", Default::default()).unwrap();
+
+// RocksDB on disk (requires feature "storage-rocksdb")
+let rocks_db = DbInstance::new("rocksdb", "/path/to/data/", Default::default()).unwrap();
+```
+
+Valid engine strings: `"mem"`, `"sqlite"`, `"rocksdb"`, `"newrocksdb"`, `"sled"`, `"tikv"` — each gated behind its own feature flag.
+
+## Running Queries
+
+`run_script` takes the CozoScript string, a `BTreeMap` of parameters, and a `ScriptMutability` flag.
+
+```rust
+use cozo::*;
+use std::collections::BTreeMap;
+
+let db = DbInstance::new("mem", "", Default::default()).unwrap();
+
+// Read-only query, no parameters
+let result = db
+    .run_script("?[a] := a in [1, 2, 3]", Default::default(), ScriptMutability::Immutable)
+    .unwrap();
+
+println!("{:?}", result);
+// NamedRows { headers: ["a"], rows: [[Int(1)], [Int(2)], [Int(3)]] }
+```
+
+### The `NamedRows` return type
+
+```rust
+pub struct NamedRows {
+    pub headers: Vec<String>,
+    pub rows: Vec<Vec<DataValue>>,
+}
+```
+
+### Passing parameters
+
+Build a `BTreeMap<String, DataValue>` and pass it as the second argument:
+
+```rust
+use cozo::*;
+use std::collections::BTreeMap;
+
+let db = DbInstance::new("mem", "", Default::default()).unwrap();
+
+let mut params = BTreeMap::new();
+params.insert("name".to_string(), DataValue::Str("Alice".into()));
+params.insert("age".to_string(), DataValue::from(30i64));
+
+let result = db
+    .run_script(
+        "?[name, age] := name = $name, age = $age",
+        params,
+        ScriptMutability::Immutable,
+    )
+    .unwrap();
+```
+
+### `DataValue` variants
+
+| Variant | Rust type |
+|---|---|
+| `DataValue::Null` | `()` |
+| `DataValue::Bool(bool)` | `bool` |
+| `DataValue::Int(i64)` | `i64` |
+| `DataValue::Float(f64)` | `f64` |
+| `DataValue::Str(SmartString)` | `&str` / `String` |
+| `DataValue::Bytes(Vec<u8>)` | byte slice |
+| `DataValue::Uuid(UuidWrapper)` | UUID |
+| `DataValue::List(Vec<DataValue>)` | heterogeneous list |
+| `DataValue::Json(JsonData)` | arbitrary JSON |
+
+## Multi-statement Transactions
+
+Use `db.multi_transaction(write)` to get a `MultiTransaction` handle. Scripts inside the transaction share the same snapshot.
+
+```rust
+use cozo::*;
+
+let db = DbInstance::new("mem", "", Default::default()).unwrap();
+
+// Open a write transaction
+let tx = db.multi_transaction(true);
+
+tx.run_script(":create account {id: Int => balance: Float}", Default::default()).unwrap();
+tx.run_script(
+    "?[id, balance] <- [[1, 100.0]] :put account {id => balance}",
+    Default::default(),
+).unwrap();
+
+// Commit — or call tx.abort() to roll back
+tx.commit().unwrap();
+```
+
+<Warning>
+  Write transactions may block other reads for some storage backends. RocksDB guarantees no read blocking for concurrent write transactions.
+</Warning>
+
+## Export and Import Relations
+
+```rust
+// Export
+let exported: std::collections::BTreeMap<String, NamedRows> =
+    db.export_relations(["my_relation"].iter().map(|s| *s)).unwrap();
+
+// Import (relations must already exist)
+db.import_relations(exported).unwrap();
+```
+
+## Backup and Restore
+
+Backups use the SQLite file format regardless of the source backend, making them portable across engines.
+
+```rust
+db.backup_db("/path/to/backup.db").unwrap();
+
+// Restore into a fresh (empty) database
+let fresh = DbInstance::new("rocksdb", "/path/to/new/", Default::default()).unwrap();
+fresh.restore_backup("/path/to/backup.db").unwrap();
+```
+
+## Mutation Callbacks
+
+`register_callback` returns a `(u32, Receiver<(CallbackOp, NamedRows, NamedRows)>)` pair.
+The `u32` is the callback ID used to unregister; the `Receiver` delivers events whenever rows in the named relation are mutated.
+
+```rust
+use cozo::*;
+
+let db = DbInstance::new("mem", "", Default::default()).unwrap();
+
+// capacity = None uses the default channel buffer size
+let (cb_id, receiver) = db.register_callback("my_relation", None);
+
+std::thread::spawn(move || {
+    // Each message is (CallbackOp, new_rows: NamedRows, old_rows: NamedRows)
+    for (op, new_rows, old_rows) in receiver {
+        println!("op={:?}", op);
+        println!("new: {:?}", new_rows);
+        println!("old: {:?}", old_rows);
+    }
+});
+
+// Later, when done:
+db.unregister_callback(cb_id);
+```
+
+## Custom Fixed Rules
+
+Implement the `FixedRule` trait to add your own built-in rule:
+
+```rust
+use cozo::*;
+
+struct MyRule;
+
+impl FixedRule for MyRule {
+    fn arity(
+        &self,
+        options: &std::collections::BTreeMap<SmartString<smartstring::LazyCompact>, Expr>,
+        rule_head: &[Symbol],
+        span: SourceSpan,
+    ) -> miette::Result<usize> {
+        Ok(1)
+    }
+
+    fn run(
+        &self,
+        payload: FixedRulePayload<'_, '_>,
+        out: &mut RegularTempStore,
+        poison: Poison,
+    ) -> miette::Result<()> {
+        let input = payload.get_input(0)?;
+        for tuple in input.iter()? {
+            out.put(tuple?);
+        }
+        Ok(())
+    }
+}
+
+let db = DbInstance::new("mem", "", Default::default()).unwrap();
+db.register_fixed_rule("MyRule".to_string(), MyRule).unwrap();
+```

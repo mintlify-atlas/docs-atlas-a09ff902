@@ -1,0 +1,200 @@
+---
+title: "Using CozoDB from C, C++, and Any Language with C FFI"
+description: "Use the CozoDB C library and cozo_c.h header to embed CozoDB from C, C++, Go, or any language that supports C FFI, with full query and backup support."
+---
+
+The CozoDB C library (`libcozo_c`) exposes a stable C API defined in a single header file, `cozo_c.h`. Any language that can call into C — including C++, Go, Ruby, Lua, Python (via `ctypes`), and many others — can use this API to embed CozoDB. Prebuilt shared libraries are available for Linux (x86\_64, ARM64), macOS (ARM64, x86\_64), and Windows (x86\_64).
+
+<Note>
+  Go wraps this C API directly via cgo. See [cozo-lib-go](https://github.com/cozodb/cozo-lib-go) for the idiomatic Go package.
+</Note>
+
+## Getting the Library
+
+Download pre-built libraries from the [CozoDB releases page](https://github.com/cozodb/cozo/releases) — look for files starting with `libcozo_c`. The `cozo_c.h` header is in the `cozo-lib-c` directory of the repository.
+
+## The Header: `cozo_c.h`
+
+Include the header in your project:
+
+```c
+#include "cozo_c.h"
+```
+
+The full header is reproduced below for reference:
+
+```c
+#include <stdbool.h>
+#include <stdint.h>
+
+/* Open a database.
+ * engine:  "mem", "sqlite", or "rocksdb"
+ * path:    null-terminated UTF-8 path string
+ * options: JSON options string; pass "{}" for defaults
+ * db_id:   output — receives the integer ID of the opened database
+ *
+ * Returns NULL on success, or a C-string error message.
+ * The returned error string must be freed with cozo_free_str.
+ */
+char *cozo_open_db(const char *engine,
+                   const char *path,
+                   const char *options,
+                   int32_t *db_id);
+
+/* Close a database by ID.
+ * Returns true if closed, false if already closed or not found.
+ */
+bool cozo_close_db(int32_t db_id);
+
+/* Run a CozoScript query.
+ * db_id:           ID from cozo_open_db
+ * script_raw:      null-terminated UTF-8 CozoScript string
+ * params_raw:      null-terminated UTF-8 JSON params object; pass "{}" if none
+ * immutable_query: pass true for read-only queries
+ *
+ * Returns a UTF-8 JSON string that MUST be freed with cozo_free_str.
+ */
+char *cozo_run_query(int32_t db_id,
+                     const char *script_raw,
+                     const char *params_raw,
+                     bool immutable_query);
+
+/* Import data into relations (triggers are NOT fired).
+ * json_payload: JSON in the same format returned by cozo_export_relations.
+ * Returns a result string that MUST be freed with cozo_free_str.
+ */
+char *cozo_import_relations(int32_t db_id, const char *json_payload);
+
+/* Export relations to JSON.
+ * json_payload: JSON spec: {"relations": ["rel1", "rel2"]}
+ * Returns a result string that MUST be freed with cozo_free_str.
+ */
+char *cozo_export_relations(int32_t db_id, const char *json_payload);
+
+/* Backup the database to an SQLite file.
+ * Returns a result string that MUST be freed with cozo_free_str.
+ */
+char *cozo_backup(int32_t db_id, const char *out_path);
+
+/* Restore from an SQLite backup file.
+ * Returns a result string that MUST be freed with cozo_free_str.
+ */
+char *cozo_restore(int32_t db_id, const char *in_path);
+
+/* Import specific relations from a backup file.
+ * json_payload: {"path": "...", "relations": [...]}
+ * Returns a result string that MUST be freed with cozo_free_str.
+ */
+char *cozo_import_from_backup(int32_t db_id, const char *json_payload);
+
+/* Free any C-string returned by the Cozo C API.
+ * Must be called exactly once per returned string.
+ */
+void cozo_free_str(char *s);
+```
+
+## Memory Management
+
+Every function that returns a `char *` allocates a new string on the heap. You **must** call `cozo_free_str` on the pointer exactly once when you are finished with it. Forgetting to free strings causes a memory leak; freeing the same pointer twice causes undefined behaviour.
+
+<Warning>
+  Never free a result string with the standard `free()`. Always use `cozo_free_str` — the library may use a different allocator.
+</Warning>
+
+## Example C Program
+
+```c
+#include "cozo_c.h"
+#include <stdio.h>
+#include <stdlib.h>
+
+int main(void) {
+    int32_t db_id;
+
+    /* Open an in-memory database */
+    char *err = cozo_open_db("mem", "", "{}", &db_id);
+    if (err != NULL) {
+        fprintf(stderr, "Failed to open DB: %s\n", err);
+        cozo_free_str(err);
+        return 1;
+    }
+
+    /* Run a read-only query */
+    char *result = cozo_run_query(db_id, "?[a] := a in [1, 2, 3]", "{}", true);
+    printf("%s\n", result);
+    cozo_free_str(result);
+
+    /* Create a relation and insert a row */
+    char *create = cozo_run_query(
+        db_id, ":create user {name: String => age: Int}", "{}", false);
+    cozo_free_str(create);
+
+    char *insert = cozo_run_query(
+        db_id,
+        "?[name, age] <- [[\"Alice\", 30]] :put user {name => age}",
+        "{}",
+        false
+    );
+    cozo_free_str(insert);
+
+    /* Query with parameters */
+    char *query = cozo_run_query(
+        db_id,
+        "?[name, age] := *user{name, age}, name = $name",
+        "{\"name\": \"Alice\"}",
+        true
+    );
+    printf("%s\n", query);
+    cozo_free_str(query);
+
+    /* Close the database */
+    cozo_close_db(db_id);
+    return 0;
+}
+```
+
+Compile and run (assuming the library is in `../target/release/`):
+
+```bash
+gcc -L../target/release/ -lcozo_c example.c -o example && ./example
+```
+
+## Backup and Restore
+
+```c
+/* Backup */
+char *bak = cozo_backup(db_id, "/path/to/backup.db");
+cozo_free_str(bak);
+
+/* Restore into a fresh database */
+int32_t new_db;
+cozo_open_db("rocksdb", "/path/to/new/", "{}", &new_db);
+char *res = cozo_restore(new_db, "/path/to/backup.db");
+cozo_free_str(res);
+```
+
+## Export and Import Relations
+
+```c
+/* Export */
+char *exported = cozo_export_relations(
+    db_id,
+    "{\"relations\": [\"user\"]}"
+);
+/* Parse the JSON string as needed, then free */
+cozo_free_str(exported);
+
+/* Import (relation must already exist; triggers are NOT fired) */
+char *import_result = cozo_import_relations(db_id, exported_json_string);
+cozo_free_str(import_result);
+```
+
+## Building from Source
+
+With the [Rust toolchain](https://www.rust-lang.org/tools/install) installed:
+
+```bash
+cargo build --release -p cozo_c -F compact -F storage-rocksdb
+```
+
+The compiled shared library will be in `target/release/`.

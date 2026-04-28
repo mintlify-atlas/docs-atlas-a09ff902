@@ -1,0 +1,127 @@
+---
+title: "Time travel queries in CozoDB"
+description: "Query historical states of your data by enabling per-relation validity tracking and using point-in-time syntax directly inside CozoScript Datalog rules."
+keywords: ["time travel", "validity", "historical queries", "audit trail", "slowly-changing dimensions", "event sourcing"]
+---
+
+CozoDB supports time travel on a per-relation basis. Rather than adding a universal
+timestamp overhead to every stored row, you opt in for each relation where historical
+querying matters. This keeps relations that do not need the feature as lean as they would
+be without it, while giving you full point-in-time query capability where you need it.
+
+## How time travel works
+
+When a relation has a `validity` column, CozoDB records not just the current value of each
+row but also the time range during which that row is considered valid. Mutations write a new
+validity interval rather than overwriting the previous one, so historical versions are
+retained on disk. Queries can then be anchored to any past timestamp to reconstruct the
+state of the relation at that moment.
+
+<Note>
+  The Sled and TiKV storage backends do **not** support time travel. Use the in-memory,
+  SQLite, or RocksDB backend if you need this feature.
+</Note>
+
+## Creating a time-travel-enabled relation
+
+Add a `validity` column when you define the relation using `:create` or `:replace`.
+The `validity` type is a special built-in that stores a timestamp-based validity range.
+
+```datalog
+:create user_status {
+    user_id: String
+    =>
+    status: String,
+    validity: Validity
+}
+```
+
+The `=>` separator divides key columns (left) from value columns (right). The `validity`
+column must be a value column.
+
+<Tip>
+  Enable time travel only where you genuinely need historical queries. Each versioned write
+  stores an additional row, so the storage footprint grows with mutation frequency.
+</Tip>
+
+## Writing data with validity
+
+Use `:put` as normal. CozoDB automatically stamps the row with the current timestamp as
+its validity start. The previous row's validity range is closed at that same timestamp.
+
+```datalog
+?[user_id, status, validity] <- [['u1', 'active', 'now']]
+:put user_status { user_id, status, validity }
+```
+
+Pass `'now'` as a sentinel to use the server's current time, or supply an explicit numeric
+Unix timestamp (microseconds) for controlled ingestion of historical data.
+
+## Querying at a point in time
+
+Append `@` followed by a timestamp to a relation reference to query its state at that
+moment. The timestamp is a numeric Unix timestamp in microseconds.
+
+```datalog
+?[user_id, status] := *user_status[user_id, status] @ 1_700_000_000_000_000
+```
+
+Any row whose validity interval covers the given timestamp is returned. Rows created
+after the timestamp, or whose validity was already closed before it, are excluded.
+
+To query the current state without specifying a timestamp, use the relation as normal — the
+engine implicitly uses the present time:
+
+```datalog
+?[user_id, status] := *user_status{ user_id, status }
+```
+
+## Combining time travel with joins
+
+Point-in-time references compose with ordinary joins. You can join a historical snapshot
+of one relation against the current state of another in the same query:
+
+```datalog
+?[user_id, name, status] :=
+    *user_profile{ user_id, name },
+    *user_status[user_id, status] @ 1_700_000_000_000_000
+```
+
+## Use cases
+
+<CardGroup cols={3}>
+  <Card title="Audit trails" icon="clock-rotate-left">
+    Reconstruct the exact state of a record at any past moment for compliance or
+    debugging without maintaining a separate history table.
+  </Card>
+  <Card title="Slowly-changing dimensions" icon="arrow-trend-up">
+    Track how dimension attributes — prices, categories, customer segments — evolved
+    over time and join them at the correct point when analysing historical fact data.
+  </Card>
+  <Card title="Event sourcing" icon="list-timeline">
+    Store state transitions as versioned rows and query the materialised view at any
+    past timestamp instead of replaying the full event log.
+  </Card>
+</CardGroup>
+
+## Storage overhead tradeoff
+
+Each mutation on a time-travel-enabled relation writes a new row with a fresh validity
+interval and retains the previous row with a closed interval. Over time this accumulates
+additional disk space proportional to the mutation rate and the number of distinct keys.
+
+<Warning>
+  Enable `validity` only on relations where historical queries are a genuine requirement.
+  High-frequency mutation patterns on large relations can grow the on-disk size
+  significantly compared to a non-time-travel relation with the same logical data.
+</Warning>
+
+## Backend compatibility
+
+| Backend | Time travel supported |
+|---------|----------------------|
+| `mem` (in-memory) | Yes |
+| `sqlite` | Yes |
+| `rocksdb` | Yes |
+| `sled` | No |
+| `tikv` | No |
